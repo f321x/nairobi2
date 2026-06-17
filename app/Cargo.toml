@@ -1,0 +1,50 @@
+[package]
+name = "nairobi-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "nairobi2: permissionless Nostr ridesharing, Slint UI"
+
+[lib]
+# `name` must match the Android manifest's `android.app.lib_name`.
+name = "nairobi_app"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "nairobi-desktop"
+path = "src/main.rs"
+required-features = ["desktop"]
+
+[dependencies]
+nairobi-core = { path = "../core" }
+log.workspace = true
+tokio = { workspace = true }
+slint = { version = "1.16", default-features = false, features = ["std", "compat-1-2"] }
+# nostr types (Keys, PublicKey) come from nostr-sdk, the same dep core uses.
+# Pinned to the workspace line so app + core share one crypto/TLS backend.
+nostr-sdk.workspace = true
+# Map tiles arrive as PNG bytes from `nairobi_core::geo::http::https_get`; we
+# decode them here with `image`. PNG-only decoder, default features off so the
+# Android cross-build pulls in no extra C codecs.
+image = { version = "0.25", default-features = false, features = ["png"] }
+# JNI glue is compiled (but only *constructed* on Android) on every target, so
+# host `cargo check`/`clippy` validate it without an NDK.
+jni = "0.21"
+ndk-context = "0.1"
+
+[target.'cfg(target_os = "android")'.dependencies]
+android_logger = "0.15"
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }
+
+[features]
+default = []
+# Desktop development build: `cargo run -p nairobi-app --features desktop`.
+desktop = ["slint/backend-winit", "slint/renderer-femtovg", "slint/renderer-software", "slint/accessibility"]
+# Android build (via cargo-ndk): the android-activity backend (renders with Skia).
+android = ["slint/backend-android-activity-06"]
+
+[build-dependencies]
+slint-build = "1.16"

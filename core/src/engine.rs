@@ -32,6 +32,10 @@ const SUBSCRIBE_WINDOW_SECS: u64 = 600;
 const REFRESH_SECS: u64 = 60;
 /// Emit a location beacon to the counterpart every this many seconds while matched.
 const BEACON_SECS: u64 = 5;
+/// Buffer competing acceptances for this long before committing to the
+/// deterministic winner, so the order relays deliver them in can't change who
+/// wins (and an offline-then-reconnect passenger resolves identically).
+const MATCH_WINDOW_SECS: u64 = 2;
 
 // ---- Commands & snapshots --------------------------------------------------
 
@@ -164,6 +168,9 @@ struct PassengerState {
     phase: PassengerPhase,
     published_ids: HashSet<String>,
     acceptances: Vec<Acceptance>,
+    /// When set, the engine is collecting competing acceptances and will commit
+    /// to the deterministic winner once `now` reaches this deadline.
+    resolve_at: Option<u64>,
     driver: Option<PublicKey>,
     driver_location: Option<LatLng>,
     last_beacon: u64,
@@ -302,6 +309,7 @@ impl<P: Pool> Engine<P> {
             phase: PassengerPhase::Searching,
             published_ids: HashSet::new(),
             acceptances: Vec::new(),
+            resolve_at: None,
             driver: None,
             driver_location: None,
             last_beacon: 0,
@@ -349,36 +357,54 @@ impl<P: Pool> Engine<P> {
         }
     }
 
-    /// React to an incoming acceptance addressed to us.
+    /// Buffer a competing acceptance and arm the resolution window. The winner
+    /// is chosen deterministically once the window elapses ([`Self::resolve_match`]),
+    /// so the order relays deliver acceptances in can't change who wins.
     fn on_acceptance(&mut self, acc: Acceptance) {
         let now = self.now;
-        let mut matched: Option<(PublicKey, RideRequest)> = None;
         if let Role::Passenger(p) = &mut self.role {
             if p.phase != PassengerPhase::Searching {
                 return;
             }
             p.acceptances.push(acc);
+            if p.resolve_at.is_none() {
+                p.resolve_at = Some(now + MATCH_WINDOW_SECS);
+            }
+        } else {
+            return;
+        }
+        self.emit_passenger();
+    }
+
+    /// Commit to the deterministic first-taker-wins winner over every acceptance
+    /// collected this session, re-publish the request as Matched (telling the
+    /// winner and the losers), and switch subscriptions to beacons + DMs.
+    fn resolve_match(&mut self) {
+        let now = self.now;
+        let mut matched: Option<RideRequest> = None;
+        if let Role::Passenger(p) = &mut self.role {
             let cands = matching::candidates(&p.acceptances, p.t0, &p.published_ids);
-            if let Some(w) = matching::winner(&cands) {
-                if let Ok(driver_pk) = PublicKey::parse(&w.driver) {
+            match matching::winner(&cands)
+                .and_then(|w| PublicKey::parse(&w.driver).ok().map(|pk| (pk, w.driver.clone())))
+            {
+                Some((driver_pk, driver_hex)) => {
                     p.phase = PassengerPhase::Matched;
                     p.driver = Some(driver_pk);
                     p.request.status = RideStatus::Matched;
-                    p.request.winner = Some(w.driver.clone());
+                    p.request.winner = Some(driver_hex);
                     p.last_beacon = now;
-                    matched = Some((driver_pk, p.request.clone()));
+                    p.resolve_at = None;
+                    matched = Some(p.request.clone());
                 }
+                None => p.resolve_at = None, // no valid winner; keep searching
             }
         }
-        if let Some((driver, req)) = matched {
-            // Re-publish the request as matched (tells the winner + tells losers).
+        if let Some(req) = matched {
             self.publish_request(&req);
-            // Listen for the driver's beacons + DMs (acceptances no longer needed).
             self.pool.subscribe(vec![
                 protocol::beacons_filter(&self.me, SUBSCRIBE_WINDOW_SECS),
                 protocol::dm_filter(&self.me, SUBSCRIBE_WINDOW_SECS),
             ]);
-            let _ = driver;
             self.emit_passenger();
         }
     }
@@ -596,19 +622,23 @@ impl<P: Pool> Engine<P> {
         match &mut self.role {
             Role::Passenger(p) => match p.phase {
                 PassengerPhase::Searching => {
-                    let elapsed = now.saturating_sub(p.t0);
-                    if auction::is_expired(elapsed) {
-                        p.phase = PassengerPhase::Expired;
-                    } else {
-                        let rate = p.auction.rate_at(elapsed);
-                        let rate_changed = rate != p.request.current_rate;
-                        let stale = now.saturating_sub(p.last_publish) >= REFRESH_SECS;
-                        if rate_changed || stale {
-                            p.request.current_rate = rate;
-                            p.request.fare_estimate =
-                                auction::fare(rate, p.request.distance_km);
-                            p.last_publish = now;
-                            to_publish = Some(p.request.clone());
+                    // Freeze escalation while collecting acceptances (we're about
+                    // to match); otherwise keep climbing the rate / refreshing.
+                    if p.resolve_at.is_none() {
+                        let elapsed = now.saturating_sub(p.t0);
+                        if auction::is_expired(elapsed) {
+                            p.phase = PassengerPhase::Expired;
+                        } else {
+                            let rate = p.auction.rate_at(elapsed);
+                            let rate_changed = rate != p.request.current_rate;
+                            let stale = now.saturating_sub(p.last_publish) >= REFRESH_SECS;
+                            if rate_changed || stale {
+                                p.request.current_rate = rate;
+                                p.request.fare_estimate =
+                                    auction::fare(rate, p.request.distance_km);
+                                p.last_publish = now;
+                                to_publish = Some(p.request.clone());
+                            }
                         }
                     }
                 }
@@ -643,6 +673,16 @@ impl<P: Pool> Engine<P> {
         }
         if let (Some(to), Some(loc)) = (beacon_to, self.location) {
             self.publish_beacon(to, loc);
+        }
+        // Commit a pending match once the collection window has elapsed.
+        let resolve = matches!(
+            &self.role,
+            Role::Passenger(p)
+                if p.phase == PassengerPhase::Searching
+                    && p.resolve_at.is_some_and(|d| now >= d)
+        );
+        if resolve {
+            self.resolve_match();
         }
         // An expired search needs a UI update.
         if matches!(&self.role, Role::Passenger(p) if p.phase == PassengerPhase::Expired) {
@@ -910,6 +950,9 @@ mod tests {
         let acc = protocol::build_acceptance(&driver, &request_event).unwrap();
         h.engine
             .handle(EngineCmd::Pool(PoolEvent::Incoming(Box::new(acc))));
+        // Let the collection window elapse; a tick then commits the match.
+        h.engine
+            .handle(EngineCmd::Tick { now: 1000 + MATCH_WINDOW_SECS + 1 });
 
         // The re-published request is now Matched, naming the driver.
         let matched = h.pool.last_published().unwrap();
@@ -948,6 +991,10 @@ mod tests {
             .handle(EngineCmd::Pool(PoolEvent::Incoming(Box::new(a2))));
         h.engine
             .handle(EngineCmd::Pool(PoolEvent::Incoming(Box::new(a1))));
+        // Resolution happens after the window — over BOTH acceptances — so the
+        // winner is the deterministic one regardless of arrival order.
+        h.engine
+            .handle(EngineCmd::Tick { now: 1000 + MATCH_WINDOW_SECS + 1 });
 
         let snap = h.last_passenger().unwrap();
         assert_eq!(snap.phase, PassengerPhase::Matched);
@@ -1087,6 +1134,8 @@ mod tests {
         let acc = protocol::build_acceptance(&driver, &request_event).unwrap();
         h.engine
             .handle(EngineCmd::Pool(PoolEvent::Incoming(Box::new(acc))));
+        h.engine
+            .handle(EngineCmd::Tick { now: 1000 + MATCH_WINDOW_SECS + 1 });
 
         // Driver's beacon to the passenger.
         let beacon = Beacon {

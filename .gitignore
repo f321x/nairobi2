@@ -1,0 +1,17 @@
+# Rust
+/target
+**/target
+Cargo.lock.orig
+
+# Build pipeline outputs
+/dist
+/.docker-target
+/release-signing
+android/app/build
+android/build
+android/.gradle
+android/app/src/main/jniLibs
+
+# OS / editor
+.DS_Store
+*.swp

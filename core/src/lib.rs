@@ -22,6 +22,7 @@
 
 pub mod auction;
 pub mod config;
+pub mod engine;
 pub mod error;
 pub mod geo;
 pub mod keys;

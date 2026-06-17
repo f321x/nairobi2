@@ -168,6 +168,15 @@ pub fn beacons_filter(me: &PublicKey, since_secs_ago: u64) -> Filter {
         .since(Timestamp::now() - since_secs_ago)
 }
 
+/// Subscription for NIP-17 gift-wrapped private DMs addressed to `me`
+/// (kind 1059). The `nostr-sdk` client unwraps these into the inner message.
+pub fn dm_filter(me: &PublicKey, since_secs_ago: u64) -> Filter {
+    Filter::new()
+        .kind(Kind::GiftWrap)
+        .pubkey(*me)
+        .since(Timestamp::now() - since_secs_ago)
+}
+
 // ---- NIP-40 expiry --------------------------------------------------------
 
 /// The NIP-40 expiration timestamp (unix secs), if present.

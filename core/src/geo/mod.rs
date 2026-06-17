@@ -9,6 +9,7 @@
 pub mod geohash;
 pub mod http;
 pub mod routing;
+pub mod tiles;
 
 use serde::{Deserialize, Serialize};
 

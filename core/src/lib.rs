@@ -20,6 +20,7 @@
 //!
 //! No module here ever touches a UI toolkit or an OS API directly.
 
+pub mod auction;
 pub mod config;
 pub mod error;
 pub mod geo;

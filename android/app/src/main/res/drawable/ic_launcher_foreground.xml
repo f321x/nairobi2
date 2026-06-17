@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- destination pin -->
+    <path
+        android:fillColor="#f5b32a"
+        android:pathData="M54,28c-9.4,0 -17,7.6 -17,17 0,12.8 17,33 17,33s17,-20.2 17,-33c0,-9.4 -7.6,-17 -17,-17zM54,51a6,6 0 1,1 0,-12 6,6 0 0,1 0,12z" />
+    <!-- route / road dashes leading to the pin -->
+    <path
+        android:strokeColor="#2dd4bf"
+        android:strokeWidth="3"
+        android:strokeLineCap="round"
+        android:fillColor="#00000000"
+        android:pathData="M34,86 L46,72" />
+    <path
+        android:strokeColor="#2dd4bf"
+        android:strokeWidth="3"
+        android:strokeLineCap="round"
+        android:fillColor="#00000000"
+        android:pathData="M52,66 L58,60" />
+</vector>

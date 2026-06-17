@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Nairobi" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#101417</item>
+        <item name="android:statusBarColor">#101417</item>
+        <item name="android:navigationBarColor">#18202a</item>
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+    </style>
+    <color name="ic_launcher_background">#101417</color>
+</resources>

@@ -1,0 +1,91 @@
+plugins {
+    id 'com.android.application'
+}
+
+// Build-time injection: CI (and local release builds) pass values through the
+// environment (set by scripts/build-apk.sh); a -P<prop> fallback covers manual
+// Gradle invocations, and a hardcoded default covers plain dev builds.
+def fromEnvOrProp = { String envName, String propName, fallback ->
+    def v = System.getenv(envName)
+    if (v == null || v.toString().isEmpty()) {
+        v = project.findProperty(propName)
+    }
+    return (v == null || v.toString().isEmpty()) ? fallback : v
+}
+
+android {
+    namespace 'io.nairobi.app'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "io.nairobi.app"
+        minSdk 26
+        targetSdk 34
+        // Overridable so a tag build can stamp the release version (CI sets
+        // NAIROBI_VERSION_NAME from the tag and NAIROBI_VERSION_CODE from the
+        // run number).
+        versionCode fromEnvOrProp('NAIROBI_VERSION_CODE', 'nairobiVersionCode', '1').toString().toInteger()
+        versionName fromEnvOrProp('NAIROBI_VERSION_NAME', 'nairobiVersionName', '0.1.0').toString()
+
+        // ABIs are controlled by which jniLibs cargo-ndk produced; this
+        // filter just guards against stray folders. scripts/build-apk.sh passes
+        // -PnairobiAbis="<csv>" matching the ABIs it cross-compiled.
+        ndk {
+            //noinspection ChromeOsAbiSupport
+            abiFilters = (project.findProperty('nairobiAbis') ?: 'arm64-v8a,armeabi-v7a,x86_64').split(',')
+        }
+    }
+
+    // Release signing is wired up only when a keystore is supplied. CI on a tag
+    // decodes it from a secret and exports the env vars below. Without a
+    // keystore the release config is left empty and unassigned, so
+    // scripts/build-apk.sh refuses a release build rather than emit an unsigned
+    // APK.
+    def keystorePath = fromEnvOrProp('NAIROBI_KEYSTORE', 'nairobiKeystore', null)
+    signingConfigs {
+        release {
+            if (keystorePath != null) {
+                storeFile file(keystorePath)
+                storePassword fromEnvOrProp('NAIROBI_KEYSTORE_PASSWORD', 'nairobiKeystorePassword', '').toString()
+                keyAlias fromEnvOrProp('NAIROBI_KEY_ALIAS', 'nairobiKeyAlias', '').toString()
+                keyPassword fromEnvOrProp('NAIROBI_KEY_PASSWORD', 'nairobiKeyPassword', '').toString()
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            // Rust code is compiled by cargo-ndk before Gradle runs; the
+            // "debug" APK intentionally packages release-profile .so files
+            // (a debug-profile Slint+Skia build is huge and slow). It is
+            // signed with AGP's auto-generated, ephemeral debug keystore.
+            debuggable true
+        }
+        release {
+            minifyEnabled false
+            if (keystorePath != null) {
+                signingConfig signingConfigs.release
+            }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    sourceSets {
+        // libnairobi_app.so (+ libc++_shared.so) are placed in
+        // src/main/jniLibs/<abi>/ by scripts/build-apk.sh via cargo-ndk.
+        main.jniLibs.srcDirs += 'src/main/jniLibs'
+    }
+
+    // No unused build features.
+    buildFeatures {
+        buildConfig false
+    }
+}
+
+dependencies {
+    // none — plain Android framework APIs only
+}

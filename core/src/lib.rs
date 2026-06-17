@@ -25,6 +25,7 @@ pub mod config;
 pub mod error;
 pub mod geo;
 pub mod keys;
+pub mod matching;
 
 pub use error::{Error, Result};
 

@@ -26,6 +26,7 @@ pub mod error;
 pub mod geo;
 pub mod keys;
 pub mod matching;
+pub mod protocol;
 
 pub use error::{Error, Result};
 

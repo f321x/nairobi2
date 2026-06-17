@@ -1,0 +1,39 @@
+[workspace]
+resolver = "2"
+members = ["core"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/felixboeck/nairobi2"
+
+[workspace.dependencies]
+# Nostr stack. nostr-sdk 0.44.x is hard-pinned to the rustls *ring* crypto
+# provider downstream (async-wsocket), so the Android aarch64 cross-build never
+# pulls aws-lc-rs. `default-features = false` is a no-op today (defaults empty)
+# but future-proofs the 0.45 upgrade, where the backend becomes a feature.
+# `nip59` brings NIP-17 private DMs (transitively enables `nip44`).
+nostr-sdk = { version = "0.44", default-features = false, features = ["nip44", "nip59"] }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+log = "0.4"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "net", "macros"] }
+
+# Minimal HTTPS for Nominatim/OSRM + OSM tiles, over the SAME rustls/ring stack
+# as the relay layer — deliberately no reqwest/hyper, so the Android build gains
+# no second crypto / C dependency.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+webpki-roots = "0.26"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
+
+# Keep overflow checks on in release for the core domain logic (fare/auction math).
+[profile.release.package.nairobi-core]
+overflow-checks = true

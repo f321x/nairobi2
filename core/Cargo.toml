@@ -1,0 +1,20 @@
+[package]
+name = "nairobi-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "UI-free, OS-free core of the nairobi2 permissionless Nostr ridesharing app"
+
+[dependencies]
+nostr-sdk.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+log.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+webpki-roots.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time", "test-util"] }

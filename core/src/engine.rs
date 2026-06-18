@@ -172,6 +172,10 @@ pub struct DriverSnapshot {
 /// mempool.space).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Notarization {
+    /// Stable leaf-hash (hex) identifying this burn across re-fetches — the txid
+    /// changes when the notary RBFs the batch, so the leaf is what dedups a
+    /// mempool entry against its later confirmed upgrade. Not shown to the user.
+    pub leaf: String,
     /// Notarization transaction id, display hex (what `mempool.space/tx/<txid>`
     /// expects). Empty only for a not-yet-broadcast proof.
     pub txid: String,
@@ -843,12 +847,15 @@ impl<P: Pool> Engine<P> {
                     Ok(ev) => self.pool.publish(ev),
                     Err(e) => log::warn!("build upvoting event: {e}"),
                 }
+                let leaf = crate::burn::to_hex(&proof.leaf_hash());
+                let confirmed_now = proof.is_confirmed();
+                let sats = proof.leaf_value_msat / 1000;
                 self.reputation.record(
-                    crate::burn::to_hex(&proof.leaf_hash()),
+                    leaf.clone(),
                     BurnRecord {
                         pubkey: self.me.to_hex(),
                         value_msat: proof.leaf_value_msat,
-                        confirmed: proof.is_confirmed(),
+                        confirmed: confirmed_now,
                         counterparty,
                     },
                 );
@@ -857,23 +864,32 @@ impl<P: Pool> Engine<P> {
                     BurnPurpose::Ride => ("ride", "Ride"),
                     BurnPurpose::Boost => ("boost", "Boost"),
                 };
-                self.emit(UiEvent::Toast(format!(
-                    "{toast_what} reputation +{} sat",
-                    proof.leaf_value_msat / 1000
-                )));
-                // Record the notarization tx for the transparency list.
+                // A mempool burn is provisional (it doesn't count toward gating
+                // until it confirms); say so rather than implying it's durable.
+                self.emit(UiEvent::Toast(if confirmed_now {
+                    format!("{toast_what} reputation +{sats} sat")
+                } else {
+                    format!("{toast_what} burn pending +{sats} sat (mempool)")
+                }));
+                // Record the notarization tx for the transparency list, keyed by
+                // leaf hash: a mempool entry is upgraded in place once the burn
+                // confirms (the RBF'd txid changes), instead of showing twice.
                 const MAX_NOTARIZATIONS: usize = 50;
-                self.notarizations.insert(
-                    0,
-                    Notarization {
-                        txid: proof.txid.clone(),
-                        label: label.to_string(),
-                        amount_sats: proof.leaf_value_msat / 1000,
-                        confirmed: proof.is_confirmed(),
-                        at: self.now,
-                    },
-                );
-                self.notarizations.truncate(MAX_NOTARIZATIONS);
+                let entry = Notarization {
+                    leaf: leaf.clone(),
+                    txid: proof.txid.clone(),
+                    label: label.to_string(),
+                    amount_sats: sats,
+                    confirmed: confirmed_now,
+                    at: self.now,
+                };
+                match self.notarizations.iter_mut().find(|n| n.leaf == leaf) {
+                    Some(existing) => *existing = entry,
+                    None => {
+                        self.notarizations.insert(0, entry);
+                        self.notarizations.truncate(MAX_NOTARIZATIONS);
+                    }
+                }
                 let me = self.me.to_hex();
                 let confirmed = self.reputation.score_sats(&me);
                 let provisional = self.reputation.provisional_sats(&me);
@@ -1669,6 +1685,65 @@ mod tests {
         assert_eq!(pending_sats, 700);
         // …and does not yet count toward the gate.
         assert_eq!(h.engine.reputation_sats(&keys.public_key().to_hex()), 0);
+    }
+
+    #[test]
+    fn provisional_then_confirmed_burn_upgrades_in_place() {
+        // The real notary surfaces a mempool proof first, then the confirmed
+        // one (same leaf, RBF'd txid). The transparency list must upgrade the
+        // single entry in place — not show the burn twice — and reputation must
+        // flip from pending to confirmed.
+        let (mut h, _burn, _brx, keys) = burn_harness(0, 0);
+        h.engine.handle(EngineCmd::Tick { now: 1000 });
+
+        let base = crate::burn::proof::BurnProof {
+            version: crate::burn::PROOF_VERSION,
+            chain: None,
+            event_id: [1u8; 32],
+            leaf_value_msat: 700_000,
+            nonce: [0u8; 32],
+            merkle_hashes: Vec::new(),
+            merkle_index: 0,
+            txid: crate::burn::to_hex(&[0u8; 32]),
+            block_height: 0, // mempool
+            upvoter_pubkey: None,
+            upvoter_signature: None,
+        };
+        h.engine.handle(EngineCmd::Burn(BurnOutcome::Proven {
+            purpose: BurnPurpose::Bond,
+            proof: Box::new(base.clone()),
+            counterparty: None,
+        }));
+        // Same burn confirms: same leaf (event_id/value/nonce/upvoter), new txid.
+        let confirmed = crate::burn::proof::BurnProof {
+            txid: crate::burn::to_hex(&[9u8; 32]),
+            block_height: 42,
+            ..base
+        };
+        h.engine.handle(EngineCmd::Burn(BurnOutcome::Proven {
+            purpose: BurnPurpose::Bond,
+            proof: Box::new(confirmed),
+            counterparty: None,
+        }));
+
+        let mut snap = None;
+        while let Ok(ev) = h.ui.try_recv() {
+            if let UiEvent::Notarizations {
+                items,
+                reputation_sats,
+                pending_sats,
+            } = ev
+            {
+                snap = Some((items, reputation_sats, pending_sats));
+            }
+        }
+        let (items, reputation_sats, pending_sats) = snap.expect("a Notarizations UiEvent");
+        assert_eq!(items.len(), 1, "the mempool entry upgrades in place");
+        assert!(items[0].confirmed);
+        assert_eq!(items[0].txid, crate::burn::to_hex(&[9u8; 32]));
+        assert_eq!(reputation_sats, 700); // now durable
+        assert_eq!(pending_sats, 0);
+        assert_eq!(h.engine.reputation_sats(&keys.public_key().to_hex()), 700);
     }
 
     #[test]

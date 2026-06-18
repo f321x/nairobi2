@@ -319,43 +319,55 @@ impl BurnService for NotaryBurnService {
             };
             wallet.pay_invoice(added.invoice.clone(), max_fee);
 
-            let mut proof = None;
+            // Poll for the proof. The notary first returns a **mempool** proof
+            // (`block_height == 0`), then later the confirmed one (the RBF'd
+            // batch lands in a block). Surface the provisional proof as soon as
+            // it appears and verifies, so the user gets feedback right after
+            // paying instead of staring at nothing for the whole confirmation
+            // wait; then keep polling and surface it again once confirmed (the
+            // engine's reputation ledger upgrades unconfirmed → confirmed in
+            // place, deduped by leaf hash). A Boost is satisfied by mempool
+            // acceptance and stops at the first valid proof.
+            let mut announced_provisional = false;
+            let mut verified_any = false;
             for _ in 0..MAX_POLLS {
                 tokio::time::sleep(POLL_INTERVAL).await;
-                match notary.get_proof(&added.rhash).await {
-                    Ok(Some(p)) => {
-                        let confirmed = p.is_confirmed();
-                        proof = Some(p);
-                        // Bonds/rides want a confirmed proof; keep polling until
-                        // it lands in a block. A Boost is happy with mempool.
-                        if confirmed || req.purpose == BurnPurpose::Boost {
-                            break;
-                        }
-                    }
-                    Ok(None) => {}
+                let p = match notary.get_proof(&added.rhash).await {
+                    Ok(Some(p)) => p,
+                    Ok(None) => continue,
                     Err(e) => {
                         let _ = tx.send(fail(format!("get_proof: {e}")));
                         return;
                     }
+                };
+                let confirmed = p.is_confirmed();
+                // Part B: verify on-chain before trusting our own proof. A just-
+                // broadcast tx may not be indexed by every Electrum server yet,
+                // so treat a verify miss as "not ready" and keep polling rather
+                // than failing the whole burn.
+                if let Err(e) = Self::fetch_and_verify(&electrum, &p).await {
+                    log::debug!("burn proof not yet verifiable: {e}");
+                    continue;
                 }
-            }
-            let Some(proof) = proof else {
-                let _ = tx.send(fail("timed out waiting for proof".into()));
-                return;
-            };
-
-            // Part B: verify on-chain before trusting our own proof.
-            match Self::fetch_and_verify(&electrum, &proof).await {
-                Ok(_) => {
+                verified_any = true;
+                // Emit on the first (provisional) proof and again once it
+                // confirms; skip the redundant unconfirmed re-emits in between.
+                if confirmed || !announced_provisional {
+                    announced_provisional = true;
                     let _ = tx.send(BurnOutcome::Proven {
                         purpose: req.purpose,
-                        proof: Box::new(proof),
+                        proof: Box::new(p),
                         counterparty: req.counterparty.clone(),
                     });
                 }
-                Err(e) => {
-                    let _ = tx.send(fail(format!("verify: {e}")));
+                if confirmed || req.purpose == BurnPurpose::Boost {
+                    return;
                 }
+            }
+            // Never got a verifiable proof at all (vs. got a mempool one that
+            // simply hasn't confirmed yet — that's already surfaced as pending).
+            if !verified_any {
+                let _ = tx.send(fail("timed out waiting for proof".into()));
             }
         });
     }

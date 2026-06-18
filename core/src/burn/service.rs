@@ -203,9 +203,50 @@ impl BurnService for MockBurnService {
 
 // ---- NotaryBurnService (real: notary + wallet + Electrum) ------------------
 
-/// How long to keep polling the notary for a proof, and how often.
-const POLL_INTERVAL: Duration = Duration::from_secs(5);
-const MAX_POLLS: u32 = 120; // ~10 min: covers payment + a first confirmation
+/// Poll the notary fast while waiting for the first (mempool) proof so the user
+/// gets feedback within seconds of paying…
+const POLL_FAST: Duration = Duration::from_secs(5);
+/// …then back off once the provisional proof is in hand and we're only waiting
+/// for a block (saves battery / notary load during the long confirmation wait).
+const POLL_SLOW: Duration = Duration::from_secs(30);
+/// Give up the whole burn only if *no* proof appears at all within this window
+/// (payment not seen / notary down). The mempool proof normally lands within a
+/// minute of the invoice settling; this is a generous backstop.
+const FETCH_DEADLINE: Duration = Duration::from_secs(5 * 60);
+/// Keep watching for the *confirmation* (to upgrade pending → durable) for up to
+/// this long. A notary batch RBFs for a while before it lands in a block, so the
+/// ~10 min of a single block is not enough; the provisional proof is already
+/// surfaced as pending throughout. (Resuming the watch across app restarts is a
+/// deferred durability item — see the design spec's status note.)
+const CONFIRM_DEADLINE: Duration = Duration::from_secs(60 * 60);
+
+/// What the watch does with a freshly fetched proof. Pure, so the network
+/// loop's policy is unit-tested even though the loop itself does live I/O.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProofStep {
+    /// Confirmed on-chain — verify it against Electrum (Part B) before crediting
+    /// durable reputation, then finish.
+    VerifyAndFinish,
+    /// The first mempool proof — surface it as provisional straight away
+    /// (server-trusted, no Electrum gate; design §8.1) so pending reputation and
+    /// a notarization entry show right after paying.
+    SurfaceProvisional,
+    /// A mempool proof we've already surfaced — keep waiting for a block.
+    AwaitConfirmation,
+}
+
+/// Decide what to do with a proof given whether it's confirmed and whether we've
+/// already surfaced the provisional one. A mempool proof is *not* gated on our
+/// own Electrum check (it's unreliable for a just-broadcast / RBF-replaced tx,
+/// and per §8.1 mempool acceptance is server-trusted and provisional anyway);
+/// only a confirmed proof is verified before it counts toward durable reputation.
+fn proof_step(confirmed: bool, announced_provisional: bool) -> ProofStep {
+    match (confirmed, announced_provisional) {
+        (true, _) => ProofStep::VerifyAndFinish,
+        (false, false) => ProofStep::SurfaceProvisional,
+        (false, true) => ProofStep::AwaitConfirmation,
+    }
+}
 
 /// The real service: requests a burn from the notary, pays the invoice with the
 /// app [`Wallet`], polls for the proof, and verifies it against Electrum.
@@ -319,55 +360,82 @@ impl BurnService for NotaryBurnService {
             };
             wallet.pay_invoice(added.invoice.clone(), max_fee);
 
-            // Poll for the proof. The notary first returns a **mempool** proof
-            // (`block_height == 0`), then later the confirmed one (the RBF'd
-            // batch lands in a block). Surface the provisional proof as soon as
-            // it appears and verifies, so the user gets feedback right after
-            // paying instead of staring at nothing for the whole confirmation
-            // wait; then keep polling and surface it again once confirmed (the
-            // engine's reputation ledger upgrades unconfirmed → confirmed in
-            // place, deduped by leaf hash). A Boost is satisfied by mempool
-            // acceptance and stops at the first valid proof.
+            // Poll for the proof. The notary returns a **mempool** proof
+            // (`block_height == 0`) within seconds, then the **confirmed** one
+            // (the RBF'd batch lands in a block) much later. We surface the
+            // mempool proof as soon as the notary returns it — provisional,
+            // server-trusted (design §8.1), so the user sees pending reputation +
+            // a notarization entry right after paying. We do *not* block that on
+            // our own Electrum check, which is unreliable for a just-broadcast /
+            // RBF-replaced tx; full client-side verification gates only the
+            // confirmed proof that grants durable reputation. The engine upgrades
+            // pending → durable in place (deduped by leaf hash) when the confirmed
+            // proof arrives. A Boost is satisfied by the mempool proof and stops.
+            let start = tokio::time::Instant::now();
             let mut announced_provisional = false;
-            let mut verified_any = false;
-            for _ in 0..MAX_POLLS {
-                tokio::time::sleep(POLL_INTERVAL).await;
+            loop {
+                let elapsed = start.elapsed();
+                if elapsed >= CONFIRM_DEADLINE
+                    || (!announced_provisional && elapsed >= FETCH_DEADLINE)
+                {
+                    // Give up *only* if nothing was ever surfaced; once the
+                    // provisional proof is pending in the UI a quiet stop is
+                    // correct (the confirmation may simply outlast this watch).
+                    if !announced_provisional {
+                        let _ = tx.send(fail("timed out waiting for proof".into()));
+                    }
+                    return;
+                }
+                tokio::time::sleep(if announced_provisional { POLL_SLOW } else { POLL_FAST }).await;
+
                 let p = match notary.get_proof(&added.rhash).await {
                     Ok(Some(p)) => p,
                     Ok(None) => continue,
                     Err(e) => {
+                        // A transient notary hiccup must not nuke an already-
+                        // pending burn; only fail before anything is surfaced.
+                        log::debug!("get_proof: {e}");
+                        if announced_provisional {
+                            continue;
+                        }
                         let _ = tx.send(fail(format!("get_proof: {e}")));
                         return;
                     }
                 };
-                let confirmed = p.is_confirmed();
-                // Part B: verify on-chain before trusting our own proof. A just-
-                // broadcast tx may not be indexed by every Electrum server yet,
-                // so treat a verify miss as "not ready" and keep polling rather
-                // than failing the whole burn.
-                if let Err(e) = Self::fetch_and_verify(&electrum, &p).await {
-                    log::debug!("burn proof not yet verifiable: {e}");
-                    continue;
+
+                match proof_step(p.is_confirmed(), announced_provisional) {
+                    ProofStep::VerifyAndFinish => {
+                        // Part B: verify on-chain before crediting durable rep. A
+                        // just-confirmed tx may not be indexed by every Electrum
+                        // server yet, so a miss is "not ready" — keep polling.
+                        match Self::fetch_and_verify(&electrum, &p).await {
+                            Ok(_) => {
+                                let _ = tx.send(BurnOutcome::Proven {
+                                    purpose: req.purpose,
+                                    proof: Box::new(p),
+                                    counterparty: req.counterparty.clone(),
+                                });
+                                return;
+                            }
+                            Err(e) => {
+                                log::debug!("confirmed burn proof not yet verifiable: {e}");
+                                continue;
+                            }
+                        }
+                    }
+                    ProofStep::SurfaceProvisional => {
+                        announced_provisional = true;
+                        let _ = tx.send(BurnOutcome::Proven {
+                            purpose: req.purpose,
+                            proof: Box::new(p),
+                            counterparty: req.counterparty.clone(),
+                        });
+                        if req.purpose == BurnPurpose::Boost {
+                            return; // mempool acceptance is enough for a boost
+                        }
+                    }
+                    ProofStep::AwaitConfirmation => continue,
                 }
-                verified_any = true;
-                // Emit on the first (provisional) proof and again once it
-                // confirms; skip the redundant unconfirmed re-emits in between.
-                if confirmed || !announced_provisional {
-                    announced_provisional = true;
-                    let _ = tx.send(BurnOutcome::Proven {
-                        purpose: req.purpose,
-                        proof: Box::new(p),
-                        counterparty: req.counterparty.clone(),
-                    });
-                }
-                if confirmed || req.purpose == BurnPurpose::Boost {
-                    return;
-                }
-            }
-            // Never got a verifiable proof at all (vs. got a mempool one that
-            // simply hasn't confirmed yet — that's already surfaced as pending).
-            if !verified_any {
-                let _ = tx.send(fail("timed out waiting for proof".into()));
             }
         });
     }
@@ -414,6 +482,21 @@ mod tests {
             out.push(ev);
         }
         out
+    }
+
+    #[test]
+    fn proof_step_surfaces_mempool_then_awaits_confirmation() {
+        // A mempool proof we haven't shown yet is surfaced provisionally — note
+        // this branch is reached *without* an Electrum check, so a fresh /
+        // RBF-churning tx still gives the user immediate feedback.
+        assert_eq!(proof_step(false, false), ProofStep::SurfaceProvisional);
+        // Once surfaced, further mempool re-fetches just keep waiting (no double
+        // surface) until a block lands.
+        assert_eq!(proof_step(false, true), ProofStep::AwaitConfirmation);
+        // A confirmed proof is verified on-chain before it credits durable
+        // reputation, whether or not we surfaced the provisional one first.
+        assert_eq!(proof_step(true, false), ProofStep::VerifyAndFinish);
+        assert_eq!(proof_step(true, true), ProofStep::VerifyAndFinish);
     }
 
     #[test]

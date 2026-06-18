@@ -1103,7 +1103,7 @@ impl Controller {
                 Some(s) => {
                     ctrl.set_wallet_busy("Creating Lightning invoice…");
                     ctrl.wallet
-                        .receive_lightning(Amount::from_sats(s), "nairobi top-up".into());
+                        .receive_lightning(Amount::from_sats(s), "Nairobi top-up".into());
                 }
                 None => ctrl.toast("Enter an amount in sat"),
             }

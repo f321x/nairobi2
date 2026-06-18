@@ -51,12 +51,53 @@ and the same internal "pay this Lightning invoice" API work over any backend:
 The LUD-16 lightning-address / LNURL-pay resolution behind the M-Pesa payout is pure and unit-tested
 (no network in tests). See [`CLAUDE.md`](CLAUDE.md) for how to enable the Fedimint backend.
 
+## Sybil resistance — proof-of-burn reputation
+
+Anyone can mint a Nostr key for free, so an open feed invites **Sybil spam**: a flood of throwaway
+identities posting fake ride requests and acceptances. nairobi2 raises the cost of that flood with
+**proof-of-burn** — a publicly verifiable Bitcoin commitment that a number of satoshis was
+**irreversibly sacrificed to the miners**, attached to a Nostr event. Burns are produced by a
+**notary** ([`notary.electrum.org`](https://github.com/spesmilo/notary)), paid over the app's
+Lightning wallet, and **verified client-side against Electrum indexing servers** — so no party is
+ever trusted for proof *validity*, only for liveness. (Based on T. Voegtlin's *The Price of
+Attention: Attaching Bitcoin Fees to Nostr Events*, 2025.)
+
+It is a **client-side filter, never a gatekeeper**: a burn makes you more *visible* under each
+peer's own threshold; it never grants or denies the right to ride. Reputation is layered so the
+cost stays **off the ride's critical path**:
+
+- **L1 — identity bond.** Burn once (a few hundred sats) against a stable, self-signed identity
+  event. That burn *is* your baseline reputation, and every Sybil identity now costs real money.
+- **L2 — proof-of-ride.** After a completed ride, each party can burn ~1 % of the fare against a
+  ride-completion attestation, so reputation accrues with genuine, **counterparty-diverse** usage.
+- **L3 — reputation gate.** Drivers and passengers hide or flag peers below a **self-chosen**
+  minimum reputation. The expensive part already happened, so ride-time filtering is a cache
+  lookup with zero added latency.
+- **L3′ — newcomer boost (optional).** A fresh, weaker *mempool* burn on a single request buys
+  immediate visibility before reputation exists; it can be anonymous.
+
+A burn binds to a pubkey only when that key both **authors** the event and **signs** the burn's
+leaf hash — the Nostr identity key is the same secp256k1 / BIP340 key, so there's no second
+keypair. Scores sum only **confirmed, leaf-hash-deduplicated** burns, and the whole subsystem is
+**off by default**, so the app stays permissionless out of the box and a market can tighten
+thresholds if it wants to.
+
+> **Still no backend.** Proof-of-burn adds no server: burns are Bitcoin transactions, proofs ride
+> on Nostr (addressable kind-30021 events), and verification is your phone talking to Electrum
+> indexers. A cheating notary simply produces no valid proof, and the notary is a swappable
+> interface.
+
+See the [proof-of-burn design spec](docs/superpowers/specs/2026-06-18-proof-of-burn-antisybil-design.md)
+and the [protocol notes](docs/proof-of-burn-api.md) for the full scheme.
+
 ## Status
 
 - **Core logic — complete and tested.** The entire ride engine (identity, geocoding/routing,
   the escalating auction, deterministic first-taker-wins, the Nostr protocol, the relay transport,
-  the full ride lifecycle, and the modular wallet + LUD-16/M-Pesa payout logic) lives in the
-  `nairobi-core` crate and passes **95 unit tests**.
+  the full ride lifecycle, the modular wallet + LUD-16/M-Pesa payout logic, and the proof-of-burn
+  anti-Sybil layer — leaf/Merkle-sum hashing, Bitcoin tx/script parsing, client-side proof
+  verification, and the bond → proof → reputation → gating lifecycle) lives in the `nairobi-core`
+  crate and passes **136 unit tests**.
 - **App + Android shell + build pipeline — building.** `./build.sh` compiles the Slint UI,
   cross-compiles for `aarch64-linux-android` (Skia + android-activity + nostr-sdk), and packages a
   valid, signed **18 MB `dist/nairobi-debug.apk`** (`io.nairobi.app`, minSdk 26). Following the
@@ -65,8 +106,14 @@ The LUD-16 lightning-address / LNURL-pay resolution behind the M-Pesa payout is 
   (`nos.lol`, `relay.damus.io`, `relay.primal.net`). *Full on-hardware behaviour and the live
   end-to-end ride flow remain to be exercised on a device.*
 
-This is a **v1 / proof of concept**. Out of scope for now (by design): sybil resistance, ratings
-and reputation, a pre-request "drivers nearby" map, and key backup. See the design spec.
+**Sybil resistance** is now addressed by the proof-of-burn layer above: the core (hashing, tx
+parsing, verification, and reputation) is complete and host-tested against mocks, and the app
+wires the real notary + Electrum + wallet path. Gating and the per-ride burn are config-driven and
+**default off**, the live notary/Electrum/Lightning path is not yet exercised on a device, and a
+Settings action to trigger the identity bond is the remaining piece.
+
+This is a **v1 / proof of concept**. Still out of scope for now (by design): ratings and reputation
+beyond burns, a pre-request "drivers nearby" map, and key backup. See the design spec.
 
 ## Build
 

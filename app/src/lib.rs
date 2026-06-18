@@ -32,6 +32,18 @@ pub fn run_app(
     platform: Arc<dyn Platform>,
     platform_rx: mpsc::UnboundedReceiver<PlatformEvent>,
 ) {
+    // With the Fedimint backend compiled in, two rustls crypto providers are
+    // linked: `ring` (what nostr-sdk and fedimint-core are wired to) and
+    // `aws-lc-rs` (pulled by fedimint-connectors' iroh/quinn QUIC transport).
+    // rustls 0.23 has no implicit default when more than one provider is present
+    // and panics on any plain `ClientConfig::builder()`. Pin the process-wide
+    // default to `ring`; iroh/quinn pick aws-lc-rs explicitly, so they are
+    // unaffected. Must run before any TLS handshake (relays or the federation).
+    #[cfg(feature = "fedimint")]
+    {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+
     // Own the engine's tokio runtime here rather than inside the (shared, Arc'd)
     // Controller: several of the Controller's tasks hold a clone of it, so if it
     // owned the runtime the last clone could drop it from a worker thread — a

@@ -122,22 +122,32 @@ the same trait/Mock/real-impl discipline as `Pool`:
 The UI is a Wallet screen (balance, receive over LN/on-chain, send, M-Pesa payout) reached from a
 💰 button on Home; the federation invite is set in Settings (`config.federation_invite`).
 
-**Enabling the Fedimint backend** (`wallet-fedimint`): all its SDK deps are optional behind the
-crate's `fedimint` feature (and the app's `fedimint` feature), **off by default**, so the default
-`cargo test`/APK stay light and **ring-only**. Caveats when turning it on:
-- The Fedimint crates require `RUSTFLAGS="--cfg tokio_unstable"`.
-- It uses `fedimint-cursed-redb` (pure-Rust DB) — no RocksDB/C++ on Android.
-- ⚠️ **Ring-only is broken when enabled:** `fedimint-connectors`' `iroh` QUIC transport pulls
-  `aws-lc-rs` (+`quinn`). Before shipping a Fedimint APK, audit/disable the `iroh` transport or
-  force its rustls provider back to `ring` (see the one-TLS-stack rule below). With the feature
-  off, none of this is compiled and the default build is unaffected.
+**The Fedimint backend is shipped in the APK.** `scripts/build-apk.sh` builds the app with
+`--features android,fedimint`, so the real `FedimintWallet` (not the `MockWallet`) backs the
+wallet on device. The SDK deps stay optional behind the crate's `fedimint` feature (and the app's
+`fedimint` feature), still **off by default**, so the host `cargo test`/`clippy` workspace gate
+stays light and ring-only. Building the backend:
+- Needs `RUSTFLAGS="--cfg tokio_unstable"` (the build script exports it). Applies to the whole
+  app build, which is fine.
+- Uses `fedimint-cursed-redb` (pure-Rust DB) — no RocksDB/C++ on Android.
+- ⚠️ **Two TLS stacks once enabled.** `fedimint-connectors` 0.11 *hard*-depends on `iroh`/`quinn`
+  (QUIC, → `aws-lc-rs`) and on `aws-lc-sys` (with `bindgen`) — neither is behind a feature, so a
+  ring-only Fedimint build is not possible with this version. The APK therefore links **both**
+  `ring` (nostr-sdk, fedimint-core) and `aws-lc-rs` (iroh/quinn). Two consequences, both handled:
+  - **Build:** `aws-lc-sys` needs a CMake/clang/Go/Perl C toolchain (added to `docker/Dockerfile`);
+    it cross-compiles to the Android ABIs via the NDK toolchain cargo-ndk sets up.
+  - **Runtime:** rustls 0.23 panics on a default `ClientConfig::builder()` when >1 provider is
+    linked, so `run_app` pins the process-wide default to `ring` (`app/src/lib.rs`, behind the
+    `fedimint` feature). iroh/quinn select `aws-lc-rs` explicitly, so they are unaffected.
 
 ## Conventions & gotchas
 
-- **One TLS stack, ring only.** `nostr-sdk` 0.44 is hard-wired to the rustls **ring** provider
-  (no aws-lc-rs), and the map/HTTP layer reuses the same `tokio-rustls`/ring stack — deliberately,
-  so the Android cross-build gains no second crypto/C dependency. If you add a crate that pulls a
-  rustls provider, force it back: `rustls = { default-features = false, features = ["ring"] }`.
+- **Ring is the default TLS provider; keep new deps on it.** `nostr-sdk` 0.44 is hard-wired to the
+  rustls **ring** provider, and the map/HTTP layer reuses the same `tokio-rustls`/ring stack. If you
+  add a crate that pulls a rustls provider, force it back: `rustls = { default-features = false,
+  features = ["ring"] }`. The **one** sanctioned exception is the Fedimint wallet, whose
+  `fedimint-connectors` dep unavoidably links `aws-lc-rs` via iroh/quinn (see the Fedimint section
+  above) — the process default is still pinned to `ring`.
 - **Feature flags are mutually exclusive backends.** `--features desktop` (winit + femtovg) vs
   `--features android` (android-activity + Skia); the APK build uses
   `--no-default-features --features android`.
@@ -156,13 +166,14 @@ crate's `fedimint` feature (and the app's `fedimint` feature), **off by default*
   The live notary/Electrum/Lightning path is **not exercised here** (offline; like `SdkPool`). A
   Settings UI action to trigger the identity bond is the remaining step.
 - `wallet-fedimint/` — the real Fedimint backend; **compiles** with
-  `RUSTFLAGS="--cfg tokio_unstable" cargo check -p nairobi-wallet-fedimint --features fedimint`.
-  On-device/Android cross-build not yet exercised (see the ring-only caveat above).
+  `RUSTFLAGS="--cfg tokio_unstable" cargo check -p nairobi-wallet-fedimint --features fedimint`,
+  and is now **compiled into the APK** (`scripts/build-apk.sh` → `--features android,fedimint`).
 - `app/` + `android/` + build pipeline — **build end-to-end.** `./build.sh` (podman/Docker)
-  produces a valid, signed **`dist/nairobi-debug.apk`** (~18 MB, `io.nairobi.app`, arm64-v8a,
-  minSdk 26): `libnairobi_app.so` (Rust+Slint+Skia+nostr-sdk) + `libc++_shared.so` + the Java
-  shell in `classes.dex`. Verified to **compile and package**; **on-device runtime is not yet
-  exercised** (no device/emulator here, and the desktop build needs GL libs absent from the image).
+  produces a valid, signed **`dist/nairobi-debug.apk`** (`io.nairobi.app`, arm64-v8a, minSdk 26):
+  `libnairobi_app.so` (Rust+Slint+Skia+nostr-sdk+**Fedimint**) + `libc++_shared.so` + the Java
+  shell in `classes.dex`. The Fedimint dependency tree (iroh/quinn/aws-lc) grows the binary
+  noticeably. **On-device runtime is not yet exercised** (no device/emulator here, and the desktop
+  build needs GL libs absent from the image).
   See the spec for what's deferred (ratings, pre-request driver map, boot-resume, key backup).
   **Sybil resistance is now addressed** by the `burn` proof-of-burn layer (above).
 

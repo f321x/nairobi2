@@ -19,7 +19,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         openjdk-17-jdk-headless \
         build-essential pkg-config \
         libfontconfig1-dev \
+        # Toolchain for aws-lc-sys (pulled by the Fedimint wallet's
+        # fedimint-connectors -> iroh/quinn QUIC transport): CMake + Ninja drive
+        # its C build, clang/libclang back its `bindgen`, and Go + Perl generate
+        # its crypto sources. cross-compiled to the Android ABIs via the NDK.
+        cmake ninja-build clang libclang-dev golang-go perl \
     && rm -rf /var/lib/apt/lists/*
+
+# bindgen (aws-lc-sys) needs to dlopen libclang at build time; point it at the
+# distro's libclang so the cross-build doesn't have to guess.
+ENV LIBCLANG_PATH=/usr/lib/llvm-18/lib
 
 # Optional extra CA certificates (e.g. corporate TLS-inspecting proxies): drop
 # PEM files named *.crt into docker/certs/ before building. No-op when empty.

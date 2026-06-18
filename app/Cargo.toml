@@ -37,6 +37,10 @@ ndk-context = "0.1"
 # in-memory MockWallet unless the `fedimint` feature is enabled (which pulls the
 # heavy SDK and needs RUSTFLAGS="--cfg tokio_unstable").
 nairobi-wallet-fedimint = { path = "../wallet-fedimint", optional = true }
+# Only pulled with the `fedimint` feature: lets the app pin the process-wide
+# rustls crypto provider to `ring` (the Fedimint tree also links aws-lc-rs via
+# iroh/quinn, and rustls 0.23 needs one explicit default when both are present).
+rustls = { version = "0.23", default-features = false, features = ["ring"], optional = true }
 
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "0.15"
@@ -52,7 +56,7 @@ desktop = ["slint/backend-winit", "slint/renderer-femtovg", "slint/renderer-soft
 android = ["slint/backend-android-activity-06"]
 # Swap the in-memory MockWallet for the real Fedimint Bitcoin/Lightning wallet.
 # Heavy dependency tree; the build must set RUSTFLAGS="--cfg tokio_unstable".
-fedimint = ["dep:nairobi-wallet-fedimint", "nairobi-wallet-fedimint/fedimint"]
+fedimint = ["dep:nairobi-wallet-fedimint", "nairobi-wallet-fedimint/fedimint", "dep:rustls"]
 
 [build-dependencies]
 slint-build = "1.16"

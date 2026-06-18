@@ -58,10 +58,17 @@ if [ -n "$ANDROID_JAR" ]; then
     echo "    using ANDROID_JAR=$ANDROID_JAR"
 fi
 
+# The real Fedimint Bitcoin/Lightning wallet is compiled into the APK (the
+# `fedimint` app feature). Its SDK requires `--cfg tokio_unstable`, and its
+# dependency tree (fedimint-connectors -> iroh/quinn -> aws-lc-sys) brings a
+# CMake/clang C build cross-compiled via the NDK toolchain cargo-ndk configures.
+# Append to any caller-provided RUSTFLAGS rather than clobbering them.
+export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--cfg tokio_unstable"
+
 TARGET_FLAGS=()
 for abi in $ABIS; do TARGET_FLAGS+=(-t "$abi"); done
 cargo ndk "${TARGET_FLAGS[@]}" --platform 26 -o "$JNILIBS" \
-    build -p nairobi-app --lib --release --no-default-features --features android
+    build -p nairobi-app --lib --release --no-default-features --features android,fedimint
 
 # Bundle libc++_shared.so: Skia (Slint's Android renderer) links the shared
 # C++ STL.

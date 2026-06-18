@@ -5712,6 +5712,7 @@ dependencies = [
  "nairobi-wallet-fedimint",
  "ndk-context",
  "nostr-sdk",
+ "rustls",
  "slint",
  "slint-build",
  "tokio",

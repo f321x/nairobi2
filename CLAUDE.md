@@ -102,10 +102,17 @@ refreshed every 30 s). Clients also enforce expiry themselves (never trust relay
 - **The dev sandbox is offline.** Build/test core with `--offline`; the crate versions are pinned
   to the pre-populated cargo cache (`nostr-sdk 0.44.1`, `slint 1.16.1`, …).
 
-## Status (2026-06-17)
+## Status
 
 - `core/` — **complete, 78 tests passing, clippy clean**, offline.
-- `app/`, `android/`, build pipeline — written, faithful to ntrack; **verified only by the Docker
-  `cargo-ndk` build** (which needs network to build the builder image). Expect to iterate the first
-  real build. See the spec for what's deferred (sybil resistance, ratings, pre-request driver map,
-  boot-resume, key backup).
+- `app/` + `android/` + build pipeline — **build end-to-end.** `./build.sh` (podman/Docker)
+  produces a valid, signed **`dist/nairobi-debug.apk`** (~18 MB, `io.nairobi.app`, arm64-v8a,
+  minSdk 26): `libnairobi_app.so` (Rust+Slint+Skia+nostr-sdk) + `libc++_shared.so` + the Java
+  shell in `classes.dex`. Verified to **compile and package**; **on-device runtime is not yet
+  exercised** (no device/emulator here, and the desktop build needs GL libs absent from the image).
+  See the spec for what's deferred (sybil resistance, ratings, pre-request driver map, boot-resume,
+  key backup).
+
+Build notes: the first `./build.sh` builds the ~4.4 GB toolchain image (needs network); reuse it
+with `SKIP_IMAGE_BUILD=1`. A benign `llvm-strip` warning ("unable to strip libc++_shared.so /
+libnairobi_app.so") is the known NDK strip quirk — harmless.

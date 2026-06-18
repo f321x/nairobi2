@@ -29,9 +29,11 @@ Uber-like but **icon-first and numeral-based**, so it's usable by people who can
 - **Core logic — complete and tested.** The entire ride engine (identity, geocoding/routing,
   the escalating auction, deterministic first-taker-wins, the Nostr protocol, the relay transport,
   and the full ride lifecycle) lives in the `nairobi-core` crate and passes **78 unit tests**.
-- **App + Android shell + build pipeline — written**, following the proven
-  [ntrack](https://github.com/f321x/ntrack) Slint-on-Android structure; validated by the
-  containerised `cargo-ndk` build.
+- **App + Android shell + build pipeline — building.** `./build.sh` compiles the Slint UI,
+  cross-compiles for `aarch64-linux-android` (Skia + android-activity + nostr-sdk), and packages a
+  valid, signed **18 MB `dist/nairobi-debug.apk`** (`io.nairobi.app`, minSdk 26). Following the
+  proven [ntrack](https://github.com/f321x/ntrack) structure. *On-device runtime behaviour
+  (UI rendering, relay connectivity, the live ride flow) has not yet been exercised on hardware.*
 
 This is a **v1 / proof of concept**. Out of scope for now (by design): sybil resistance, ratings
 and reputation, a pre-request "drivers nearby" map, and key backup. See the design spec.

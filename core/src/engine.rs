@@ -616,6 +616,9 @@ impl<P: Pool> Engine<P> {
 
     fn on_tick(&mut self) {
         let now = self.now;
+        // Read once up front so the role match below doesn't borrow
+        // `self.location` while it holds `&mut self.role`.
+        let has_location = self.location.is_some();
         let mut to_publish: Option<RideRequest> = None;
         let mut beacon_to: Option<PublicKey> = None;
 
@@ -642,19 +645,18 @@ impl<P: Pool> Engine<P> {
                         }
                     }
                 }
-                PassengerPhase::Matched => {
-                    if now.saturating_sub(p.last_beacon) >= BEACON_SECS && self.location.is_some()
-                    {
-                        p.last_beacon = now;
-                        beacon_to = p.driver;
-                    }
+                PassengerPhase::Matched
+                    if has_location && now.saturating_sub(p.last_beacon) >= BEACON_SECS =>
+                {
+                    p.last_beacon = now;
+                    beacon_to = p.driver;
                 }
                 _ => {}
             },
             Role::Driver(d) => {
                 if d.phase == DriverPhase::Trip
+                    && has_location
                     && now.saturating_sub(d.last_beacon) >= BEACON_SECS
-                    && self.location.is_some()
                 {
                     d.last_beacon = now;
                     beacon_to = d.trip.as_ref().map(|t| t.passenger);
@@ -819,8 +821,8 @@ fn sort_offers(offers: &mut [Offer], key: SortKey) {
                 .partial_cmp(&b.pickup_distance_km)
                 .unwrap_or(std::cmp::Ordering::Equal)
         }),
-        SortKey::Earnings => offers.sort_by(|a, b| b.earnings.cmp(&a.earnings)),
-        SortKey::Rate => offers.sort_by(|a, b| b.rate.cmp(&a.rate)),
+        SortKey::Earnings => offers.sort_by_key(|o| std::cmp::Reverse(o.earnings)),
+        SortKey::Rate => offers.sort_by_key(|o| std::cmp::Reverse(o.rate)),
         SortKey::TripDistance => offers.sort_by(|a, b| {
             b.trip_distance_km
                 .partial_cmp(&a.trip_distance_km)

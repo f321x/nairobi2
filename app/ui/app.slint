@@ -19,6 +19,7 @@ export struct OfferItem {
     rate: string,              // formatted rate/km
     earnings: string,          // big number, e.g. "480"
     currency: string,
+    taken: bool,               // this driver tapped TAKE; awaiting passenger confirm
 }
 
 // One chat message in a matched ride (mirrors `engine::ChatMessage`).
@@ -86,22 +87,27 @@ component BigButton inherits Rectangle {
 component SmallButton inherits Rectangle {
     in property <string> text;
     in property <bool> danger: false;
+    in property <bool> enabled: true;
     callback clicked;
     height: 40px;
     width: label.preferred-width + 28px;
     border-radius: 12px;
-    background: t.pressed ? Theme.card-alt.brighter(20%) : Theme.card-alt;
+    background: !root.enabled ? Theme.card-alt.darker(15%)
+        : (t.pressed ? Theme.card-alt.brighter(20%) : Theme.card-alt);
     border-width: 1px;
     border-color: root.danger ? Theme.danger.darker(10%) : Theme.line;
     label := Text {
         text: root.text;
-        color: root.danger ? Theme.danger : Theme.text;
+        color: !root.enabled ? Theme.muted : (root.danger ? Theme.danger : Theme.text);
         font-size: 15px;
         font-weight: 600;
         vertical-alignment: center;
         horizontal-alignment: center;
     }
-    t := TouchArea { clicked => { root.clicked(); } }
+    t := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
 }
 
 // A round +/- stepper used by the rate setup.
@@ -695,8 +701,9 @@ component WaitingScreen inherits Rectangle {
 
 component OfferCard inherits Card {
     in property <OfferItem> item;
+    in property <bool> awaiting;   // some offer is taken, awaiting confirm
     callback take();
-    background: Theme.card;
+    background: item.taken ? Theme.accent-dim : Theme.card;
     HorizontalLayout {
         padding: Theme.pad;
         spacing: 12px;
@@ -718,7 +725,21 @@ component OfferCard inherits Card {
         }
         VerticalLayout {
             alignment: center;
-            SmallButton { text: "TAKE"; clicked => { root.take(); } }
+            if item.taken : Text {
+                text: "WAITING…";
+                color: Theme.accent;
+                font-size: 14px;
+                font-weight: 800;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            if !item.taken : SmallButton {
+                text: "TAKE";
+                // While another offer is awaiting confirmation, don't let the
+                // driver fire off a second acceptance.
+                enabled: !root.awaiting;
+                clicked => { root.take(); }
+            }
         }
     }
 }
@@ -727,6 +748,7 @@ component DriverListScreen inherits Rectangle {
     in property <[OfferItem]> offers;
     in property <int> sort-key;        // 0 pickup · 1 earnings · 2 rate · 3 trip
     in property <string> status-line;
+    in property <bool> awaiting;       // an offer is taken, awaiting passenger confirm
 
     callback back();
     callback set-sort(int);
@@ -734,6 +756,21 @@ component DriverListScreen inherits Rectangle {
 
     VerticalLayout {
         BackBar { title: "Nearby rides"; back => { root.back(); } }
+
+        // A persistent banner while we wait on the passenger to confirm our take
+        // (the offer list stays put, so without this the tap looks like a no-op).
+        if root.awaiting : Rectangle {
+            height: 44px;
+            background: Theme.accent-dim;
+            Text {
+                text: root.status-line;
+                color: Theme.text;
+                font-size: 15px;
+                font-weight: 700;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
 
         // sort toggle: three icon buttons (the task asks for 3)
         HorizontalLayout {
@@ -772,6 +809,7 @@ component DriverListScreen inherits Rectangle {
                     padding-bottom: 8px;
                     OfferCard {
                         item: o;
+                        awaiting: root.awaiting;
                         take => { root.take-ride(o.request-id); }
                     }
                 }
@@ -1446,6 +1484,7 @@ export component MainWindow inherits Window {
     in property <[OfferItem]> offers;
     in property <int> sort-key: 0;
     in property <string> driver-status: "Looking for nearby ride requests…";
+    in property <bool> driver-awaiting: false;
 
     // ---- trip ----
     in property <string> trip-banner: "";
@@ -1604,6 +1643,7 @@ export component MainWindow inherits Window {
                 offers: root.offers;
                 sort-key: root.sort-key;
                 status-line: root.driver-status;
+                awaiting: root.driver-awaiting;
                 back => { root.back-home(); }
                 set-sort(k) => { root.set-sort(k); }
                 take-ride(id) => { root.take-ride(id); }

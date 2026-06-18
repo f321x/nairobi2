@@ -141,6 +141,10 @@ pub struct Offer {
     pub rate: u32,
     pub earnings: u32,
     pub currency: String,
+    /// True for the offer this driver has tapped TAKE on and is now awaiting the
+    /// passenger's confirmation for. Lets the UI show "waiting…" on that card
+    /// instead of an idle TAKE button (the offer stays listed until we win/lose).
+    pub taken: bool,
 }
 
 /// Driver-side lifecycle phase.
@@ -1087,7 +1091,11 @@ impl<P: Pool> Engine<P> {
                     self.reputation
                         .meets(&e.event.pubkey.to_hex(), self.rep_threshold)
                 })
-                .map(|e| build_offer(&e.event, &e.req, self.location, &e.event.pubkey.to_hex()))
+                .map(|e| {
+                    let mut o = build_offer(&e.event, &e.req, self.location, &e.event.pubkey.to_hex());
+                    o.taken = d.pending_take.as_deref() == Some(o.passenger.as_str());
+                    o
+                })
                 .collect();
             sort_offers(&mut offers, d.sort);
             self.emit(UiEvent::Driver(DriverSnapshot {
@@ -1118,6 +1126,7 @@ fn build_offer(event: &Event, req: &RideRequest, driver: Option<LatLng>, passeng
         rate: req.current_rate,
         earnings: req.fare_estimate,
         currency: req.currency.clone(),
+        taken: false,
     }
 }
 
@@ -1384,6 +1393,10 @@ mod tests {
 
         let snap = h.last_driver().unwrap();
         assert_eq!(snap.phase, DriverPhase::AwaitingConfirm);
+        // The taken offer is still listed (until we win/lose) but flagged so the
+        // UI can show "waiting…" instead of a dead TAKE button.
+        assert_eq!(snap.offers.len(), 1);
+        assert!(snap.offers[0].taken);
     }
 
     #[test]
@@ -1520,6 +1533,7 @@ mod tests {
                 rate: 50,
                 earnings: 250,
                 currency: "KES".into(),
+                taken: false,
             },
             Offer {
                 request_id: "b".into(),
@@ -1532,6 +1546,7 @@ mod tests {
                 rate: 40,
                 earnings: 480,
                 currency: "KES".into(),
+                taken: false,
             },
         ];
         sort_offers(&mut offers, SortKey::PickupDistance);

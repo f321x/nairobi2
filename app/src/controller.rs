@@ -792,6 +792,7 @@ impl Controller {
                 }
                 .into(),
             );
+            ui.set_driver_awaiting(d.phase == DriverPhase::AwaitingConfirm);
             ui.set_trip_is_driver(true);
             if let Some(t) = &d.trip {
                 ui.set_trip_banner(format!("🧍 Pick up {} at the pin", t.passenger_name).into());
@@ -1434,6 +1435,7 @@ fn offers_model(offers: &[Offer]) -> slint::ModelRc<OfferItem> {
             rate: format!("{} {}/km", o.rate, o.currency).into(),
             earnings: o.earnings.to_string().into(),
             currency: o.currency.clone().into(),
+            taken: o.taken,
         })
         .collect();
     slint::ModelRc::new(slint::VecModel::from(items))

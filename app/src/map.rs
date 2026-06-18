@@ -16,7 +16,9 @@
 use std::collections::{HashMap, VecDeque};
 
 use nairobi_core::geo::http;
-use nairobi_core::geo::tiles::{self, Placement, TileId, TILE_SIZE};
+use nairobi_core::geo::tiles::{self, Placement};
+// Re-exported so the controller can name `map::TileId` for off-thread fetches.
+pub use nairobi_core::geo::tiles::TileId;
 use slint::{Rgba8Pixel, SharedPixelBuffer};
 
 /// OSM raster tile host.

@@ -24,7 +24,7 @@ use nairobi_core::geo::LatLng;
 use nairobi_core::keys;
 use nairobi_core::pool::{MockPool, Pool, SdkPool};
 use nostr_sdk::prelude::{Event, Filter, Keys, PublicKey};
-use slint::{ComponentHandle, Weak};
+use slint::Weak;
 use tokio::sync::mpsc;
 
 use crate::map::{self, MapState};

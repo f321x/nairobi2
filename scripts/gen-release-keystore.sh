@@ -1,31 +1,46 @@
 #!/usr/bin/env bash
-# Generate a persistent release signing keystore.
-# Output: release-signing/nairobi-release.jks
+# Generate the persistent release signing keystore for nairobi2 and print the
+# GitHub Actions secrets to configure.
 #
 # Preferred: `./build.sh keystore` — runs this inside the builder container, so
-# no host JDK is needed. You may also run it directly on the host if you have a
-# JDK (`keytool`) installed.
+# no host JDK is needed (output is chowned back to you, not root). You can also
+# run it directly if you have a JDK (`keytool`) on your host.
 #
-# Required env:
-#   NAIROBI_KEYSTORE_PASSWORD   keystore password
-# Optional:
-#   NAIROBI_KEY_ALIAS           key alias (default: nairobi)
-#   NAIROBI_KEY_PASSWORD        key password (default: = keystore password)
+# IMPORTANT: Android requires every update of an installed app to be signed with
+# the SAME key. Keep release-signing/ safe and backed up — losing the keystore
+# or its password means you can never ship an upgrade to existing installs.
 
 set -euo pipefail
 # Resolve the repo root so this works both inside the container (cwd /work) and
-# when invoked directly from the host as ./scripts/gen-release-keystore.sh.
+# when invoked directly from the host.
 cd "$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 
-OUT_DIR=release-signing
-KEYSTORE="$OUT_DIR/nairobi-release.jks"
+OUTDIR=release-signing
+KEYSTORE="$OUTDIR/nairobi-release.jks"
 ALIAS="${NAIROBI_KEY_ALIAS:-nairobi}"
-STOREPASS="${NAIROBI_KEYSTORE_PASSWORD:?set NAIROBI_KEYSTORE_PASSWORD}"
-KEYPASS="${NAIROBI_KEY_PASSWORD:-$STOREPASS}"
 
-mkdir -p "$OUT_DIR"
-if [ -f "$KEYSTORE" ]; then
-    echo "error: $KEYSTORE already exists (refusing to overwrite)" >&2
+if ! command -v keytool >/dev/null 2>&1; then
+    echo "error: keytool not found — install a JDK (e.g. openjdk-17-jdk-headless)," >&2
+    echo "       or generate it in the builder image instead: ./build.sh keystore" >&2
+    exit 1
+fi
+
+if [ -e "$KEYSTORE" ]; then
+    echo "error: $KEYSTORE already exists; refusing to overwrite." >&2
+    echo "       Delete it first if you really want a new key (this invalidates" >&2
+    echo "       updates for anyone who installed an APK signed with the old one)." >&2
+    exit 1
+fi
+mkdir -p "$OUTDIR"
+
+# A random alphanumeric password (used for both the store and the key). Read a
+# finite chunk and slice it: piping an infinite /dev/urandom into `head -c 32`
+# makes `tr` take SIGPIPE, which under `set -o pipefail` aborts this script
+# silently before keytool ever runs.
+PASS="$(head -c 4096 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9')"
+PASS="${PASS:0:32}"
+if [ "${#PASS}" -ne 32 ]; then
+    echo "error: could not generate a random password" >&2
     exit 1
 fi
 
@@ -33,14 +48,47 @@ keytool -genkeypair -v \
     -keystore "$KEYSTORE" \
     -alias "$ALIAS" \
     -keyalg RSA -keysize 4096 -validity 10000 \
-    -storepass "$STOREPASS" -keypass "$KEYPASS" \
+    -storepass "$PASS" -keypass "$PASS" \
     -dname "CN=nairobi2, OU=nairobi2, O=nairobi2, C=KE"
 
-# Hand the keystore back to the host user (rootful Docker creates it as root).
+# base64 without line wrapping (GNU uses -w0; BSD/macOS wraps, so strip newlines).
+B64="$(base64 -w0 "$KEYSTORE" 2>/dev/null || base64 "$KEYSTORE" | tr -d '\n')"
+printf '%s' "$B64" > "$OUTDIR/nairobi-release.jks.base64"
+{
+    echo "RELEASE_KEYSTORE_PASSWORD=$PASS"
+    echo "RELEASE_KEY_ALIAS=$ALIAS"
+    echo "RELEASE_KEY_PASSWORD=$PASS"
+} > "$OUTDIR/secrets.env"
+chmod 600 "$OUTDIR/secrets.env" "$OUTDIR/nairobi-release.jks.base64" 2>/dev/null || true
+
+# When generated inside the builder container (./build.sh keystore), hand the
+# files back to the host user instead of leaving them root-owned.
 if [ -n "${CHOWN_UID:-}" ]; then
-    chown -R "${CHOWN_UID}:${CHOWN_GID:-$CHOWN_UID}" "$OUT_DIR" 2>/dev/null || true
+    chown -R "${CHOWN_UID}:${CHOWN_GID:-$CHOWN_UID}" "$OUTDIR" 2>/dev/null || true
 fi
 
-echo "==> Created $KEYSTORE (alias=$ALIAS)."
-echo "    Keep this file AND the passwords safe — they are required to ship"
-echo "    updates that Android will accept over an installed build."
+cat <<EOF
+
+================================================================================
+Release keystore created: $KEYSTORE
+Back up the whole $OUTDIR/ directory somewhere safe (e.g. a password manager).
+It is git-ignored and must never be committed.
+
+Set these FOUR GitHub Actions secrets — Settings > Secrets and variables >
+Actions > New repository secret — or run the gh commands below:
+
+  RELEASE_KEYSTORE_BASE64    (contents of $OUTDIR/nairobi-release.jks.base64)
+  RELEASE_KEYSTORE_PASSWORD  $PASS
+  RELEASE_KEY_ALIAS          $ALIAS
+  RELEASE_KEY_PASSWORD       $PASS
+
+With the GitHub CLI (run from this repo):
+
+  gh secret set RELEASE_KEYSTORE_BASE64   < $OUTDIR/nairobi-release.jks.base64
+  gh secret set RELEASE_KEYSTORE_PASSWORD --body '$PASS'
+  gh secret set RELEASE_KEY_ALIAS         --body '$ALIAS'
+  gh secret set RELEASE_KEY_PASSWORD      --body '$PASS'
+
+Then cut a release by pushing a tag:  git tag v0.1.0 && git push origin v0.1.0
+================================================================================
+EOF

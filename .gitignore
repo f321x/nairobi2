@@ -6,7 +6,12 @@ Cargo.lock.orig
 # Build pipeline outputs
 /dist
 /.docker-target
+
+# Release signing — never commit keys or secrets
 /release-signing
+*.jks
+*.keystore
+secrets.env
 android/app/build
 android/build
 android/.gradle

@@ -45,6 +45,18 @@ fi
 
 IMAGE=nairobi-builder
 
+# Rootless podman already maps the container's root to the invoking host user,
+# so bind-mounted files come out owned by you. Chowning to your uid would then
+# map THROUGH the userns to an unusable subuid and break ownership — so only
+# chown back under a rootful daemon (Docker, or rootful podman), where the
+# container writes as real root. Empty CHOWN_* => the in-container scripts skip
+# the chown entirely.
+CHOWN_UID="" CHOWN_GID=""
+if [ "$("$DOCKER" info --format '{{.Host.Security.Rootless}}' 2>/dev/null)" != "true" ]; then
+    CHOWN_UID="$(id -u)"
+    CHOWN_GID="$(id -g)"
+fi
+
 build_image() {
     if [ "${SKIP_IMAGE_BUILD:-0}" = "1" ]; then
         echo "==> SKIP_IMAGE_BUILD=1: reusing existing '$IMAGE' image"
@@ -70,8 +82,8 @@ run_in_container() {
         -e NAIROBI_KEYSTORE_PASSWORD="${NAIROBI_KEYSTORE_PASSWORD:-}"
         -e NAIROBI_KEY_ALIAS="${NAIROBI_KEY_ALIAS:-}"
         -e NAIROBI_KEY_PASSWORD="${NAIROBI_KEY_PASSWORD:-}"
-        -e CHOWN_UID="$(id -u)"
-        -e CHOWN_GID="$(id -g)"
+        -e CHOWN_UID="${CHOWN_UID}"
+        -e CHOWN_GID="${CHOWN_GID}"
     )
     # A release build needs the signing keystore inside the container; mount it
     # read-only at a fixed path (never under /work) and point Gradle at it.

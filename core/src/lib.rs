@@ -17,6 +17,9 @@
 //!   real `nostr-sdk`-backed implementation.
 //! - [`engine`] — the single channel-driven task that owns all ride state and
 //!   talks to the UI and OS only over channels.
+//! - [`wallet`] — the modular [`wallet::Wallet`] trait (Bitcoin / Lightning),
+//!   a `MockWallet`, the LUD-16 / LNURL-pay + M-Pesa cash-out logic; the real
+//!   Fedimint backend lives in the `nairobi-wallet-fedimint` crate.
 //!
 //! No module here ever touches a UI toolkit or an OS API directly.
 
@@ -29,6 +32,7 @@ pub mod keys;
 pub mod matching;
 pub mod pool;
 pub mod protocol;
+pub mod wallet;
 
 pub use error::{Error, Result};
 

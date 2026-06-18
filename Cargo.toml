@@ -1,6 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["core", "app"]
+# `wallet-fedimint` is a member but its heavy Fedimint dependency tree is all
+# optional (off by default), so the default workspace build / `cargo test` only
+# ever compiles its light stub — core and the default APK stay ring-only.
+members = ["core", "app", "wallet-fedimint"]
 
 [workspace.package]
 version = "0.1.0"

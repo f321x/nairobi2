@@ -33,6 +33,11 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 jni = "0.21"
 ndk-context = "0.1"
 
+# The real Fedimint wallet backend. Optional + off by default: the app uses the
+# in-memory MockWallet unless the `fedimint` feature is enabled (which pulls the
+# heavy SDK and needs RUSTFLAGS="--cfg tokio_unstable").
+nairobi-wallet-fedimint = { path = "../wallet-fedimint", optional = true }
+
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "0.15"
 
@@ -45,6 +50,9 @@ default = []
 desktop = ["slint/backend-winit", "slint/renderer-femtovg", "slint/renderer-software", "slint/accessibility"]
 # Android build (via cargo-ndk): the android-activity backend (renders with Skia).
 android = ["slint/backend-android-activity-06"]
+# Swap the in-memory MockWallet for the real Fedimint Bitcoin/Lightning wallet.
+# Heavy dependency tree; the build must set RUSTFLAGS="--cfg tokio_unstable".
+fedimint = ["dep:nairobi-wallet-fedimint", "nairobi-wallet-fedimint/fedimint"]
 
 [build-dependencies]
 slint-build = "1.16"

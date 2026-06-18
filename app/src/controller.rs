@@ -23,6 +23,7 @@ use nairobi_core::geo::routing;
 use nairobi_core::geo::LatLng;
 use nairobi_core::keys;
 use nairobi_core::pool::{MockPool, Pool, SdkPool};
+use nairobi_core::wallet::{Amount, MockWallet, Wallet, WalletEvent};
 use nostr_sdk::prelude::{Event, Filter, Keys, PublicKey};
 use slint::Weak;
 use tokio::sync::mpsc;
@@ -82,12 +83,28 @@ enum Screen {
     Trip = 4,
     Chat = 5,
     Settings = 6,
+    Wallet = 7,
 }
 
 #[derive(Default)]
 struct RateSetup {
     start: u32,
     max: u32,
+}
+
+/// The wallet screen's view state, folded from [`WalletEvent`]s.
+#[derive(Default)]
+struct WalletView {
+    /// Latest spendable balance.
+    balance: Amount,
+    /// A one-line status / last-result message.
+    status: String,
+    /// The most recent Lightning invoice created to receive (shown to copy).
+    invoice: String,
+    /// The most recent on-chain deposit address (shown to copy).
+    deposit_address: String,
+    /// A send/receive is in flight.
+    busy: bool,
 }
 
 struct ViewState {
@@ -111,6 +128,8 @@ struct ViewState {
 
     relays: Vec<String>,
     npub: String,
+    /// The configured Fedimint federation invite (empty = none yet).
+    federation_invite: String,
 
     /// Driver's current sort (the snapshot doesn't carry it; we mirror it from
     /// the SetSort we send so the toggle highlights correctly).
@@ -119,6 +138,8 @@ struct ViewState {
     toast: Option<(String, Instant)>,
 
     map: MapState,
+
+    wallet: WalletView,
 }
 
 impl Default for ViewState {
@@ -137,9 +158,11 @@ impl Default for ViewState {
             location: None,
             relays: Vec::new(),
             npub: String::new(),
+            federation_invite: String::new(),
             sort: SortKey::PickupDistance,
             toast: None,
             map: MapState::default(),
+            wallet: WalletView::default(),
         }
     }
 }
@@ -151,6 +174,14 @@ pub struct Controller {
     /// runtime is owned and torn down by [`crate::run_app`].
     rt: tokio::runtime::Handle,
     cmd_tx: mpsc::UnboundedSender<EngineCmd>,
+    /// The modular wallet (Bitcoin / Lightning). A `MockWallet` by default; the
+    /// real Fedimint backend (`nairobi-wallet-fedimint`) is swapped in behind the
+    /// `fedimint` feature. The rest of the app pays Lightning invoices through
+    /// this handle, and it can later be replaced by a Nostr Wallet Connect
+    /// client without touching any caller.
+    wallet: Arc<dyn Wallet>,
+    /// Persists settings (the Fedimint federation invite) back to `config.json`.
+    store: ConfigStore,
     platform: Arc<dyn Platform>,
     ui: Weak<MainWindow>,
     view: Arc<Mutex<ViewState>>,
@@ -225,6 +256,12 @@ impl Controller {
             }
         });
 
+        // Build the modular wallet. Mock by default (deterministic, no funds);
+        // the real Fedimint backend is swapped in behind the `fedimint` feature.
+        // Its `WalletEvent`s are folded into the view by a forwarder spawned below.
+        let (wallet_tx, wallet_rx) = mpsc::unbounded_channel();
+        let wallet = build_wallet(wallet_tx, data_dir, config.federation_invite.clone(), &rt);
+
         let view = ViewState {
             screen_i: Screen::Home as i32,
             mode_passenger: true,
@@ -232,17 +269,23 @@ impl Controller {
             rate: RateSetup { start: 30, max: 120 },
             relays,
             npub,
+            federation_invite: config.federation_invite.clone().unwrap_or_default(),
             ..Default::default()
         };
 
         let ctrl = Arc::new(Self {
             rt,
             cmd_tx,
+            wallet,
+            store,
             platform,
             ui,
             view: Arc::new(Mutex::new(view)),
         });
         ctrl.clone().spawn_ui_event_loop(ui_rx);
+        ctrl.clone().spawn_wallet_event_loop(wallet_rx);
+        // Pull an initial balance so the wallet screen shows it immediately.
+        ctrl.wallet.refresh_balance();
         ctrl
     }
 
@@ -361,6 +404,111 @@ impl Controller {
         }
         self.refresh_map();
         self.schedule_render();
+    }
+
+    // ---- wallet -----------------------------------------------------------
+
+    fn spawn_wallet_event_loop(
+        self: Arc<Self>,
+        mut wallet_rx: mpsc::UnboundedReceiver<WalletEvent>,
+    ) {
+        let ctrl = self.clone();
+        self.rt.spawn(async move {
+            while let Some(ev) = wallet_rx.recv().await {
+                ctrl.on_wallet_event(ev);
+            }
+        });
+    }
+
+    /// Fold a [`WalletEvent`] into the wallet view, then re-render.
+    fn on_wallet_event(self: &Arc<Self>, ev: WalletEvent) {
+        // A completed payment or received funds changes the balance.
+        let refresh = matches!(
+            ev,
+            WalletEvent::PaymentSucceeded { .. } | WalletEvent::FundsReceived { .. }
+        );
+        {
+            let mut v = self.view.lock().unwrap();
+            let w = &mut v.wallet;
+            match ev {
+                WalletEvent::Balance(a) => w.balance = a,
+                WalletEvent::InvoiceCreated(inv) => {
+                    w.busy = false;
+                    w.invoice = inv.bolt11;
+                    w.status = format!("⚡ invoice for {} ready — share it to get paid", inv.amount);
+                }
+                WalletEvent::DepositAddress(addr) => {
+                    w.busy = false;
+                    w.deposit_address = addr;
+                    w.status = "₿ on-chain deposit address ready".into();
+                }
+                WalletEvent::PaymentSucceeded { kind, fees, .. } => {
+                    w.busy = false;
+                    w.status = if fees.msats() > 0 {
+                        format!("✓ {} sent (fee {})", kind.label(), fees)
+                    } else {
+                        format!("✓ {} sent", kind.label())
+                    };
+                }
+                WalletEvent::PaymentFailed { kind, reason } => {
+                    w.busy = false;
+                    w.status = format!("✗ {} failed: {reason}", kind.label());
+                }
+                WalletEvent::FundsReceived { amount } => {
+                    w.status = format!("✓ received {amount}");
+                }
+                WalletEvent::Status { detail, .. } => w.status = detail,
+            }
+        }
+        if refresh {
+            self.wallet.refresh_balance();
+        }
+        self.schedule_render();
+    }
+
+    /// Mark the wallet busy with a status line and render immediately.
+    fn set_wallet_busy(self: &Arc<Self>, msg: &str) {
+        {
+            let mut v = self.view.lock().unwrap();
+            v.wallet.busy = true;
+            v.wallet.status = msg.to_string();
+        }
+        self.render_now();
+    }
+
+    /// Pay a BOLT-11 invoice (the app-facing Lightning-payment API).
+    fn wallet_pay_invoice(self: &Arc<Self>, bolt11: String) {
+        let bolt11 = bolt11.trim().to_string();
+        if bolt11.is_empty() {
+            self.toast("Paste a Lightning invoice first");
+            return;
+        }
+        self.set_wallet_busy("Paying Lightning invoice…");
+        // Advisory routing-fee cap; backends that don't support it ignore it.
+        self.wallet.pay_invoice(bolt11, Amount::from_sats(50));
+    }
+
+    /// Cash out `sats` to a phone number's M-Pesa wallet via `<phone>@bitcoin.co.ke`.
+    fn wallet_pay_mpesa(self: &Arc<Self>, phone: String, sats: u64) {
+        self.set_wallet_busy("Sending M-Pesa payout…");
+        if let Err(e) =
+            nairobi_core::wallet::pay_mpesa(self.wallet.as_ref(), &phone, Amount::from_sats(sats))
+        {
+            self.view.lock().unwrap().wallet.busy = false;
+            self.toast(&format!("M-Pesa: {e}"));
+            self.render_now();
+        }
+    }
+
+    /// Withdraw `sats` on-chain to a Bitcoin `address`.
+    fn wallet_send_onchain(self: &Arc<Self>, address: String, sats: u64) {
+        let address = address.trim().to_string();
+        if address.is_empty() {
+            self.toast("Enter a Bitcoin address");
+            return;
+        }
+        self.set_wallet_busy("Sending on-chain…");
+        self.wallet.pay_onchain(address, Amount::from_sats(sats));
     }
 
     fn toast(self: &Arc<Self>, msg: &str) {
@@ -569,6 +717,19 @@ impl Controller {
                 .into(),
         );
         ui.set_can_request(view.pickup.is_some() && view.dropoff.is_some() && dist.is_some());
+
+        // ---- wallet + federation ----
+        ui.set_wallet_balance(view.wallet.balance.sats().to_string().into());
+        ui.set_wallet_status(view.wallet.status.clone().into());
+        ui.set_wallet_invoice(view.wallet.invoice.clone().into());
+        ui.set_wallet_deposit_address(view.wallet.deposit_address.clone().into());
+        ui.set_wallet_busy(view.wallet.busy);
+        let fed_status: slint::SharedString = if view.federation_invite.is_empty() {
+            "Not set — paste a federation invite".into()
+        } else {
+            "Configured ✓".into()
+        };
+        ui.set_federation_status(fed_status);
     }
 
     // ---- UI callback wiring -----------------------------------------------
@@ -755,6 +916,48 @@ impl Controller {
             ctrl.push_relays();
             ctrl.render_now();
         });
+        hook!(on_set_federation, |ctrl, invite: slint::SharedString| {
+            ctrl.set_federation(invite.trim().to_string());
+        });
+
+        // ---- wallet ----
+        hook!(on_open_wallet, |ctrl| {
+            ctrl.view.lock().unwrap().screen_i = Screen::Wallet as i32;
+            ctrl.wallet.refresh_balance();
+            ctrl.render_now();
+        });
+        hook!(on_wallet_refresh, |ctrl| {
+            ctrl.wallet.refresh_balance();
+        });
+        hook!(on_wallet_receive_lightning, |ctrl, amount: slint::SharedString| {
+            match parse_sats(&amount) {
+                Some(s) => {
+                    ctrl.set_wallet_busy("Creating Lightning invoice…");
+                    ctrl.wallet
+                        .receive_lightning(Amount::from_sats(s), "nairobi top-up".into());
+                }
+                None => ctrl.toast("Enter an amount in sat"),
+            }
+        });
+        hook!(on_wallet_receive_onchain, |ctrl| {
+            ctrl.set_wallet_busy("Getting a deposit address…");
+            ctrl.wallet.receive_onchain();
+        });
+        hook!(on_wallet_pay_invoice, |ctrl, bolt11: slint::SharedString| {
+            ctrl.wallet_pay_invoice(bolt11.to_string());
+        });
+        hook!(on_wallet_pay_mpesa, |ctrl, phone: slint::SharedString, amount: slint::SharedString| {
+            match parse_sats(&amount) {
+                Some(s) => ctrl.wallet_pay_mpesa(phone.to_string(), s),
+                None => ctrl.toast("Enter an amount in sat"),
+            }
+        });
+        hook!(on_wallet_send_onchain, |ctrl, address: slint::SharedString, amount: slint::SharedString| {
+            match parse_sats(&amount) {
+                Some(s) => ctrl.wallet_send_onchain(address.to_string(), s),
+                None => ctrl.toast("Enter an amount in sat"),
+            }
+        });
     }
 
     // ---- actions ----------------------------------------------------------
@@ -885,6 +1088,24 @@ impl Controller {
         let _ = self.cmd_tx.send(EngineCmd::SetRelays(relays));
     }
 
+    /// Persist the Fedimint federation invite to `config.json`. The wallet binds
+    /// to a federation at startup, so this takes effect on the next launch.
+    fn set_federation(self: &Arc<Self>, invite: String) {
+        let mut config = self.store.load().unwrap_or_default();
+        config.federation_invite = if invite.is_empty() { None } else { Some(invite.clone()) };
+        // Persist the in-session relay edits at the same time (the only other
+        // mutable setting), so saving here never rolls them back.
+        config.relays = self.view.lock().unwrap().relays.clone();
+        match self.store.save(&config) {
+            Ok(()) => {
+                self.view.lock().unwrap().federation_invite = invite;
+                self.toast("Federation saved — restart the app to connect your wallet");
+            }
+            Err(e) => self.toast(&format!("Could not save federation: {e}")),
+        }
+        self.render_now();
+    }
+
     pub fn shutdown(&self) {
         let _ = self.cmd_tx.send(EngineCmd::Shutdown);
         std::thread::sleep(Duration::from_millis(200));
@@ -892,6 +1113,51 @@ impl Controller {
 }
 
 // ---- helpers --------------------------------------------------------------
+
+/// Build the wallet backend: the real Fedimint wallet when the `fedimint`
+/// feature is enabled and a federation invite is configured, otherwise a
+/// deterministic in-memory [`MockWallet`] (used by the desktop simulator and as
+/// a safe fallback). Returns a trait object so the backend is swappable — a
+/// future `nairobi-wallet-nwc` would slot in here identically.
+fn build_wallet(
+    wallet_tx: mpsc::UnboundedSender<WalletEvent>,
+    data_dir: PathBuf,
+    federation_invite: Option<String>,
+    rt: &tokio::runtime::Handle,
+) -> Arc<dyn Wallet> {
+    #[cfg(feature = "fedimint")]
+    if let Some(invite) = federation_invite.clone() {
+        match nairobi_wallet_fedimint::FedimintWallet::connect_blocking(
+            rt.clone(),
+            data_dir.clone(),
+            invite,
+            wallet_tx.clone(),
+        ) {
+            Ok(w) => {
+                log::info!("fedimint wallet connected");
+                return Arc::new(w);
+            }
+            Err(e) => log::error!("fedimint wallet init failed ({e}); using mock wallet"),
+        }
+    }
+
+    // Unused when the `fedimint` feature is off.
+    let _ = (&data_dir, &federation_invite, rt);
+    let _ = wallet_tx.send(WalletEvent::Status {
+        connected: false,
+        detail: "Simulated wallet — set a Fedimint federation in Settings for real funds".into(),
+    });
+    Arc::new(MockWallet::with_balance(wallet_tx, Amount::from_sats(50_000)))
+}
+
+/// Parse a positive whole-sat amount from a text field (`None` if blank/invalid).
+fn parse_sats(s: &str) -> Option<u64> {
+    let t = s.trim();
+    if t.is_empty() {
+        return None;
+    }
+    t.parse::<u64>().ok().filter(|n| *n > 0)
+}
 
 /// Current unix time in whole seconds.
 fn unix_now() -> u64 {

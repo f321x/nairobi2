@@ -1,0 +1,52 @@
+[package]
+name = "nairobi-wallet-fedimint"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Fedimint e-cash backend for the nairobi-core Wallet trait"
+
+# The Fedimint client SDK pulls a very large, C/QUIC-heavy dependency tree, so
+# it is all *optional*, behind the `fedimint` feature (off by default). With the
+# feature off this crate is a tiny stub, so the main workspace's `cargo test`
+# and the default APK build stay light and ring-only; the app depends on this
+# crate only behind *its own* `fedimint` feature. Building the real backend needs
+# `RUSTFLAGS="--cfg tokio_unstable"` (the Fedimint crates require it).
+[features]
+# Off by default: the default build is a light stub that compiles everywhere
+# (no Fedimint deps). Turn it on to pull the real SDK and the working backend.
+default = []
+fedimint = [
+    "dep:anyhow",
+    "dep:futures",
+    "dep:fedimint-client",
+    "dep:fedimint-core",
+    "dep:fedimint-ln-client",
+    "dep:fedimint-wallet-client",
+    "dep:fedimint-mint-client",
+    "dep:fedimint-api-client",
+    "dep:fedimint-connectors",
+    "dep:fedimint-bip39",
+    "dep:fedimint-cursed-redb",
+    "dep:bitcoin",
+    "dep:lightning-invoice",
+]
+
+[dependencies]
+nairobi-core = { path = "../core" }
+log = "0.4"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }
+
+# ---- the real backend (optional; pulled only by the `fedimint` feature) ----
+anyhow = { version = "1", optional = true }
+futures = { version = "0.3", optional = true }
+fedimint-client = { version = "0.11", optional = true }
+fedimint-core = { version = "0.11", optional = true }
+fedimint-ln-client = { version = "0.11", optional = true }
+fedimint-wallet-client = { version = "0.11", optional = true }
+fedimint-mint-client = { version = "0.11", optional = true }
+fedimint-api-client = { version = "0.11", optional = true }
+fedimint-connectors = { version = "0.11", optional = true }
+fedimint-bip39 = { version = "0.11", optional = true }
+fedimint-cursed-redb = { version = "0.11", optional = true }
+bitcoin = { version = "0.32", optional = true }
+lightning-invoice = { version = "0.33", optional = true }

@@ -26,6 +26,11 @@ pub enum Error {
     /// Geocoding / routing / geohash failure.
     #[error("geo error: {0}")]
     Geo(String),
+
+    /// A wallet-layer failure (balance/receive/send, lightning-address
+    /// resolution, or the underlying Fedimint/NWC backend).
+    #[error("wallet error: {0}")]
+    Wallet(String),
 }
 
 /// Convenience alias used throughout the crate.

@@ -1,0 +1,5 @@
+# The Fedimint crates set `--cfg tokio_unstable` in their own build metadata;
+# any crate that compiles them must pass the same flag or the SDK won't build.
+# (An Android cargo-ndk build must likewise export `RUSTFLAGS="--cfg tokio_unstable"`.)
+[build]
+rustflags = ["--cfg", "tokio_unstable"]

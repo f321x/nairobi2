@@ -897,9 +897,11 @@ component SettingsScreen inherits Rectangle {
     in property <[string]> relays;
     in property <string> currency;
     in property <string> npub;
+    in property <string> federation-status;
     callback back();
     callback add-relay(string);
     callback remove-relay(string);
+    callback set-federation(string);
 
     VerticalLayout {
         BackBar { title: "Settings"; back => { root.back(); } }
@@ -967,12 +969,217 @@ component SettingsScreen inherits Rectangle {
                     }
                 }
 
+                SectionTitle { text: "BITCOIN WALLET (FEDIMINT)"; }
+                Card {
+                    VerticalLayout {
+                        padding: Theme.pad;
+                        spacing: 8px;
+                        Text {
+                            text: "Federation: " + root.federation-status;
+                            color: Theme.text;
+                            font-size: 13px;
+                            wrap: word-wrap;
+                        }
+                        Text {
+                            text: "Paste a Fedimint federation invite to fund a real Bitcoin / Lightning wallet. Takes effect on the next launch.";
+                            color: Theme.muted;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                        fed-input := LineEdit { placeholder-text: "fed11…"; }
+                        SmallButton {
+                            text: "Save federation";
+                            clicked => {
+                                root.set-federation(fed-input.text);
+                                fed-input.text = "";
+                            }
+                        }
+                    }
+                }
+
                 SectionTitle { text: "ABOUT"; }
                 Text {
                     text: "nairobi is a permissionless rideshare over Nostr. There is no company in the middle: passengers post an escalating-rate request, drivers nearby take it first-come, and the two talk directly. Locations and chat are end-to-end encrypted.";
                     color: Theme.muted;
                     font-size: 12px;
                     wrap: word-wrap;
+                }
+            }
+        }
+    }
+}
+
+// The Bitcoin / Lightning wallet: balance, receive (Lightning invoice + on-chain
+// address), and send (pay an invoice, M-Pesa payout by phone, on-chain send).
+// Wallet operations need typed input (invoices, addresses, phone numbers), so
+// this screen is more text-heavy than the rest of the icon-first UI.
+component WalletScreen inherits Rectangle {
+    in property <string> balance;
+    in property <string> status;
+    in property <string> invoice;
+    in property <string> deposit-address;
+    in property <bool> busy;
+
+    callback back();
+    callback refresh();
+    callback receive-lightning(string);
+    callback receive-onchain();
+    callback pay-invoice(string);
+    callback pay-mpesa(string, string);
+    callback send-onchain(string, string);
+
+    VerticalLayout {
+        BackBar { title: "Wallet"; back => { root.back(); } }
+        ScrollView {
+            vertical-stretch: 1;
+            VerticalLayout {
+                padding: Theme.pad;
+                spacing: 14px;
+                alignment: start;
+
+                // ---- balance ----
+                Card {
+                    background: Theme.card-alt;
+                    VerticalLayout {
+                        padding: Theme.pad;
+                        spacing: 6px;
+                        HorizontalLayout {
+                            Text {
+                                text: "BALANCE";
+                                color: Theme.muted;
+                                font-size: 13px;
+                                font-weight: 700;
+                                letter-spacing: 1px;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                            }
+                            Rectangle {
+                                width: 44px;
+                                height: 32px;
+                                border-radius: 10px;
+                                background: refresh-t.pressed ? Theme.card.brighter(20%) : transparent;
+                                Text {
+                                    text: root.busy ? "⏳" : "⟳";
+                                    color: Theme.accent;
+                                    font-size: 20px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                                refresh-t := TouchArea { clicked => { root.refresh(); } }
+                            }
+                        }
+                        HorizontalLayout {
+                            alignment: start;
+                            spacing: 8px;
+                            Text { text: root.balance; color: Theme.accent; font-size: 48px; font-weight: 900; }
+                            Text { text: "sat"; color: Theme.muted; font-size: 18px; vertical-alignment: bottom; }
+                        }
+                        if root.status != "" : Text {
+                            text: root.status;
+                            color: Theme.text;
+                            font-size: 13px;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+
+                // ---- receive / fund ----
+                SectionTitle { text: "RECEIVE / FUND"; }
+                Card {
+                    VerticalLayout {
+                        padding: Theme.pad;
+                        spacing: 10px;
+                        Text { text: "⚡ Lightning"; color: Theme.text; font-size: 16px; font-weight: 700; }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            ln-amt := LineEdit {
+                                horizontal-stretch: 1;
+                                placeholder-text: "amount in sat";
+                                input-type: InputType.number;
+                            }
+                            SmallButton { text: "Get invoice"; clicked => { root.receive-lightning(ln-amt.text); } }
+                        }
+                        if root.invoice != "" : Text {
+                            text: root.invoice;
+                            color: Theme.muted;
+                            font-size: 11px;
+                            wrap: char-wrap;
+                        }
+
+                        Rectangle { height: 1px; background: Theme.line; }
+
+                        Text { text: "₿ On-chain"; color: Theme.text; font-size: 16px; font-weight: 700; }
+                        SmallButton { text: "Get deposit address"; clicked => { root.receive-onchain(); } }
+                        if root.deposit-address != "" : Text {
+                            text: root.deposit-address;
+                            color: Theme.muted;
+                            font-size: 11px;
+                            wrap: char-wrap;
+                        }
+                    }
+                }
+
+                // ---- send: pay an invoice ----
+                SectionTitle { text: "SEND"; }
+                Card {
+                    VerticalLayout {
+                        padding: Theme.pad;
+                        spacing: 10px;
+                        Text { text: "⚡ Pay a Lightning invoice"; color: Theme.text; font-size: 16px; font-weight: 700; }
+                        inv-in := LineEdit { placeholder-text: "lnbc…"; }
+                        SmallButton {
+                            text: "Pay invoice";
+                            clicked => {
+                                root.pay-invoice(inv-in.text);
+                                inv-in.text = "";
+                            }
+                        }
+                    }
+                }
+
+                // ---- send: M-Pesa payout ----
+                SectionTitle { text: "M-PESA PAYOUT"; }
+                Card {
+                    VerticalLayout {
+                        padding: Theme.pad;
+                        spacing: 10px;
+                        Text { text: "📱 Send to a phone (KES)"; color: Theme.text; font-size: 16px; font-weight: 700; }
+                        Text {
+                            text: "Converts sat → KES via bitcoin.co.ke and pays M-Pesa.";
+                            color: Theme.muted;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                        phone-in := LineEdit { placeholder-text: "07XX XXX XXX"; input-type: InputType.number; }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            mpesa-amt := LineEdit {
+                                horizontal-stretch: 1;
+                                placeholder-text: "amount in sat";
+                                input-type: InputType.number;
+                            }
+                            SmallButton { text: "Send"; clicked => { root.pay-mpesa(phone-in.text, mpesa-amt.text); } }
+                        }
+                    }
+                }
+
+                // ---- send: on-chain ----
+                SectionTitle { text: "ON-CHAIN SEND"; }
+                Card {
+                    VerticalLayout {
+                        padding: Theme.pad;
+                        spacing: 10px;
+                        addr-in := LineEdit { placeholder-text: "bc1…"; }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            oc-amt := LineEdit {
+                                horizontal-stretch: 1;
+                                placeholder-text: "amount in sat";
+                                input-type: InputType.number;
+                            }
+                            SmallButton { text: "Send ₿"; clicked => { root.send-onchain(addr-in.text, oc-amt.text); } }
+                        }
+                    }
                 }
             }
         }
@@ -1037,6 +1244,14 @@ export component MainWindow inherits Window {
     // ---- settings ----
     in property <[string]> relays;
     in property <string> npub;
+    in property <string> federation-status: "Not set";
+
+    // ---- wallet ----
+    in property <string> wallet-balance: "0";
+    in property <string> wallet-status: "";
+    in property <string> wallet-invoice: "";
+    in property <string> wallet-deposit-address: "";
+    in property <bool> wallet-busy: false;
 
     // ---- toast ----
     in property <string> toast;
@@ -1075,6 +1290,16 @@ export component MainWindow inherits Window {
     // settings
     callback add-relay(string);
     callback remove-relay(string);
+    callback set-federation(string);
+
+    // wallet
+    callback open-wallet();
+    callback wallet-refresh();
+    callback wallet-receive-lightning(string);
+    callback wallet-receive-onchain();
+    callback wallet-pay-invoice(string);
+    callback wallet-pay-mpesa(string, string);
+    callback wallet-send-onchain(string, string);
 
     init => {
         Palette.color-scheme = ColorScheme.dark;
@@ -1196,9 +1421,26 @@ export component MainWindow inherits Window {
                 relays: root.relays;
                 currency: root.currency;
                 npub: root.npub;
+                federation-status: root.federation-status;
                 back => { root.back-home(); }
                 add-relay(u) => { root.add-relay(u); }
                 remove-relay(u) => { root.remove-relay(u); }
+                set-federation(i) => { root.set-federation(i); }
+            }
+
+            if root.screen == 7 : WalletScreen {
+                balance: root.wallet-balance;
+                status: root.wallet-status;
+                invoice: root.wallet-invoice;
+                deposit-address: root.wallet-deposit-address;
+                busy: root.wallet-busy;
+                back => { root.back-home(); }
+                refresh => { root.wallet-refresh(); }
+                receive-lightning(a) => { root.wallet-receive-lightning(a); }
+                receive-onchain => { root.wallet-receive-onchain(); }
+                pay-invoice(i) => { root.wallet-pay-invoice(i); }
+                pay-mpesa(p, a) => { root.wallet-pay-mpesa(p, a); }
+                send-onchain(addr, a) => { root.wallet-send-onchain(addr, a); }
             }
         }
 
@@ -1216,6 +1458,19 @@ export component MainWindow inherits Window {
         Text { text: "⚙"; font-size: 24px; color: Theme.text;
             horizontal-alignment: center; vertical-alignment: center; }
         gt := TouchArea { clicked => { root.open-settings(); } }
+    }
+
+    // wallet affordance on Home (top-left)
+    if root.screen == 0 : Rectangle {
+        x: 12px + root.safe-area-insets.left;
+        y: 12px + root.safe-area-insets.top;
+        width: 44px;
+        height: 44px;
+        border-radius: 22px;
+        background: wallet-t.pressed ? Theme.card-alt : transparent;
+        Text { text: "💰"; font-size: 24px;
+            horizontal-alignment: center; vertical-alignment: center; }
+        wallet-t := TouchArea { clicked => { root.open-wallet(); } }
     }
 
     if root.toast != "" : Rectangle {

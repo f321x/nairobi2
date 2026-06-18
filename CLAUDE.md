@@ -60,6 +60,10 @@ Three parts (mirrors ntrack):
   - `protocol` — build/sign/parse/validate the events + subscription filters.
   - `pool` — the `Pool` transport trait, a test `MockPool`, and the real `nostr-sdk` `SdkPool`.
   - `engine` — the single channel-driven task owning all ride state.
+  - `wallet` — the modular `Wallet` trait (Bitcoin/Lightning), a `MockWallet`, and the LUD-16 /
+    LNURL-pay + M-Pesa (`<phone>@bitcoin.co.ke`) cash-out logic. Fire-and-forget like `Pool`
+    (`WalletEvent`s come back on a channel). The real Fedimint backend lives in the separate
+    `nairobi-wallet-fedimint` crate; a future Nostr-Wallet-Connect backend is a third impl.
 - **`app/` (`nairobi-app`)** — Slint UI + `Controller` + `map` renderer + `Platform` glue + desktop
   `sim`. Builds as a `cdylib` (Android) and a desktop binary. **Cannot be host-compiled in the dev
   sandbox** (no fontconfig); it is validated by the `cargo-ndk` Docker build.
@@ -89,6 +93,35 @@ network. **Time is injected** via `Tick{now}` so auctions are deterministic in t
 Ride requests carry multiple `g` geohash tags (precision 4–7) + a NIP-40 `expiration` (~90 s,
 refreshed every 30 s). Clients also enforce expiry themselves (never trust relays to delete).
 
+### The modular wallet (Bitcoin / Lightning)
+
+`core/src/wallet/` adds a self-custodial Bitcoin/Lightning wallet behind one swappable trait —
+the same trait/Mock/real-impl discipline as `Pool`:
+
+- `wallet::Wallet` — fire-and-forget trait (`refresh_balance`, `receive_lightning`,
+  `receive_onchain`, `pay_invoice`, `pay_address`, `pay_onchain`); results come back as
+  `WalletEvent`s on a channel, folded into the controller's `ViewState` (the engine is untouched).
+  `pay_invoice` is the internal "pay a Lightning invoice" API for the rest of the app.
+- `wallet::MockWallet` — deterministic, in-memory; used by tests and the desktop sim.
+- `wallet::lnaddress` — pure, host-tested LUD-16 / LNURL-pay resolution + the
+  `<phone>@bitcoin.co.ke` **M-Pesa** cash-out (`wallet::pay_mpesa`).
+- The **real Fedimint backend** is the separate `wallet-fedimint` crate
+  (`nairobi_wallet_fedimint::FedimintWallet`, `fedimint-client` 0.11). A future Nostr Wallet
+  Connect client would be a third `Wallet` impl.
+
+The UI is a Wallet screen (balance, receive over LN/on-chain, send, M-Pesa payout) reached from a
+💰 button on Home; the federation invite is set in Settings (`config.federation_invite`).
+
+**Enabling the Fedimint backend** (`wallet-fedimint`): all its SDK deps are optional behind the
+crate's `fedimint` feature (and the app's `fedimint` feature), **off by default**, so the default
+`cargo test`/APK stay light and **ring-only**. Caveats when turning it on:
+- The Fedimint crates require `RUSTFLAGS="--cfg tokio_unstable"`.
+- It uses `fedimint-cursed-redb` (pure-Rust DB) — no RocksDB/C++ on Android.
+- ⚠️ **Ring-only is broken when enabled:** `fedimint-connectors`' `iroh` QUIC transport pulls
+  `aws-lc-rs` (+`quinn`). Before shipping a Fedimint APK, audit/disable the `iroh` transport or
+  force its rustls provider back to `ring` (see the one-TLS-stack rule below). With the feature
+  off, none of this is compiled and the default build is unaffected.
+
 ## Conventions & gotchas
 
 - **One TLS stack, ring only.** `nostr-sdk` 0.44 is hard-wired to the rustls **ring** provider
@@ -104,7 +137,10 @@ refreshed every 30 s). Clients also enforce expiry themselves (never trust relay
 
 ## Status
 
-- `core/` — **complete, 78 tests passing, clippy clean**, offline.
+- `core/` — **complete, 95 tests passing, clippy clean**, offline (78 ride + 17 wallet/M-Pesa).
+- `wallet-fedimint/` — the real Fedimint backend; **compiles** with
+  `RUSTFLAGS="--cfg tokio_unstable" cargo check -p nairobi-wallet-fedimint --features fedimint`.
+  On-device/Android cross-build not yet exercised (see the ring-only caveat above).
 - `app/` + `android/` + build pipeline — **build end-to-end.** `./build.sh` (podman/Docker)
   produces a valid, signed **`dist/nairobi-debug.apk`** (~18 MB, `io.nairobi.app`, arm64-v8a,
   minSdk 26): `libnairobi_app.so` (Rust+Slint+Skia+nostr-sdk) + `libc++_shared.so` + the Java

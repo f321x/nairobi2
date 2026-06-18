@@ -32,11 +32,31 @@ Uber-like but **icon-first and numeral-based**, so it's usable by people who can
 > **No backend, ever.** Every interaction is a signed Nostr event over public relays. The app
 > scales by scoping subscriptions with geohashes, not by adding servers.
 
+## Wallet & M-Pesa cash-out
+
+The app carries an optional **self-custodial Bitcoin / Lightning wallet**. It can be funded over
+**Lightning** (the app shows an invoice) or **on-chain** (a deposit address), spend by paying a
+Lightning invoice or sending on-chain, and — the headline feature for Kenya — **cash out to
+M-Pesa**: enter a phone number and an amount, and the app pays `<phone>@bitcoin.co.ke` over
+Lightning, which converts the sats to **KES** and pushes them to that M-Pesa wallet.
+
+The wallet sits behind one small, swappable trait (`nairobi_core::wallet::Wallet`), so the same UI
+and the same internal "pay this Lightning invoice" API work over any backend:
+
+- a deterministic **`MockWallet`** (tests + desktop simulator),
+- a **[Fedimint](https://fedimint.org) e-cash wallet** (`nairobi-wallet-fedimint`), funded from a
+  federation, and
+- — later — a **Nostr Wallet Connect** (NIP-47) link to a remote wallet, a drop-in third backend.
+
+The LUD-16 lightning-address / LNURL-pay resolution behind the M-Pesa payout is pure and unit-tested
+(no network in tests). See [`CLAUDE.md`](CLAUDE.md) for how to enable the Fedimint backend.
+
 ## Status
 
 - **Core logic — complete and tested.** The entire ride engine (identity, geocoding/routing,
   the escalating auction, deterministic first-taker-wins, the Nostr protocol, the relay transport,
-  and the full ride lifecycle) lives in the `nairobi-core` crate and passes **78 unit tests**.
+  the full ride lifecycle, and the modular wallet + LUD-16/M-Pesa payout logic) lives in the
+  `nairobi-core` crate and passes **95 unit tests**.
 - **App + Android shell + build pipeline — building.** `./build.sh` compiles the Slint UI,
   cross-compiles for `aarch64-linux-android` (Skia + android-activity + nostr-sdk), and packages a
   valid, signed **18 MB `dist/nairobi-debug.apk`** (`io.nairobi.app`, minSdk 26). Following the

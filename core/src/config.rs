@@ -36,6 +36,9 @@ pub struct Config {
     pub relays: Vec<String>,
     /// Display currency code (e.g. `KES`).
     pub currency: String,
+    /// Fedimint federation invite code the wallet joins on first use. `None`
+    /// until the user pastes one in Settings; the mock/desktop wallet ignores it.
+    pub federation_invite: Option<String>,
 }
 
 impl Default for Config {
@@ -44,6 +47,7 @@ impl Default for Config {
             secret: None,
             relays: DEFAULT_RELAYS.iter().map(|s| s.to_string()).collect(),
             currency: DEFAULT_CURRENCY.to_string(),
+            federation_invite: None,
         }
     }
 }

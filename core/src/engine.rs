@@ -190,9 +190,13 @@ pub enum UiEvent {
     /// Ask the platform to start/stop GPS.
     NeedLocation(bool),
     Toast(String),
-    /// Our proof-of-burn notarizations, most-recent first (for a transparency
-    /// list the user can open on a block explorer).
-    Notarizations(Vec<Notarization>),
+    /// Our proof-of-burn notarizations (most-recent first) plus our current
+    /// total confirmed-burn reputation in sats — a transparency view the user
+    /// can open on a block explorer.
+    Notarizations {
+        items: Vec<Notarization>,
+        reputation_sats: u64,
+    },
 }
 
 // ---- Internal state --------------------------------------------------------
@@ -863,7 +867,10 @@ impl<P: Pool> Engine<P> {
                     },
                 );
                 self.notarizations.truncate(MAX_NOTARIZATIONS);
-                self.emit(UiEvent::Notarizations(self.notarizations.clone()));
+                self.emit(UiEvent::Notarizations {
+                    items: self.notarizations.clone(),
+                    reputation_sats: self.reputation.score_sats(&self.me.to_hex()),
+                });
                 self.emit_current();
             }
             BurnOutcome::Failed { reason, .. } => {
@@ -1572,19 +1579,25 @@ mod tests {
         h.engine.handle(EngineCmd::PublishBond { amount_sats: 500 });
         pump_burn(&mut h, &mut brx);
 
-        // The engine emits a Notarizations snapshot the UI can list + open.
-        let mut list = None;
+        // The engine emits a Notarizations snapshot (list + reputation total).
+        let mut snap = None;
         while let Ok(ev) = h.ui.try_recv() {
-            if let UiEvent::Notarizations(n) = ev {
-                list = Some(n);
+            if let UiEvent::Notarizations {
+                items,
+                reputation_sats,
+            } = ev
+            {
+                snap = Some((items, reputation_sats));
             }
         }
-        let list = list.expect("a Notarizations UiEvent");
-        assert_eq!(list.len(), 1);
-        assert_eq!(list[0].label, "Identity bond");
-        assert_eq!(list[0].amount_sats, 500);
-        assert!(list[0].confirmed);
-        assert_eq!(list[0].txid.len(), 64); // a 32-byte txid in display hex
+        let (items, reputation_sats) = snap.expect("a Notarizations UiEvent");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label, "Identity bond");
+        assert_eq!(items[0].amount_sats, 500);
+        assert!(items[0].confirmed);
+        assert_eq!(items[0].txid.len(), 64); // a 32-byte txid in display hex
+        // The confirmed bond counts toward the surfaced reputation total.
+        assert_eq!(reputation_sats, 500);
     }
 
     #[test]

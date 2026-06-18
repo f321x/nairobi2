@@ -965,6 +965,7 @@ component SettingsScreen inherits Rectangle {
     in property <string> npub;
     in property <string> federation-status;
     in property <[NotarizationItem]> notarizations;
+    in property <string> reputation;   // total confirmed-burn sats
     callback back();
     callback add-relay(string);
     callback remove-relay(string);
@@ -1066,6 +1067,32 @@ component SettingsScreen inherits Rectangle {
                 }
 
                 SectionTitle { text: "PROOF-OF-BURN"; }
+                Card {
+                    background: Theme.card-alt;
+                    VerticalLayout {
+                        padding: Theme.pad;
+                        spacing: 4px;
+                        Text {
+                            text: "REPUTATION";
+                            color: Theme.muted;
+                            font-size: 12px;
+                            font-weight: 700;
+                            letter-spacing: 1px;
+                        }
+                        HorizontalLayout {
+                            alignment: start;
+                            spacing: 8px;
+                            Text { text: root.reputation; color: Theme.accent; font-size: 36px; font-weight: 900; }
+                            Text { text: "sat burnt"; color: Theme.muted; font-size: 14px; vertical-alignment: bottom; }
+                        }
+                        Text {
+                            text: "Bitcoin you've irreversibly burnt to back this identity. The more you burn, the more visible your requests are to others who filter spam by reputation.";
+                            color: Theme.muted;
+                            font-size: 11px;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
                 Card {
                     VerticalLayout {
                         padding: 8px;
@@ -1393,6 +1420,7 @@ export component MainWindow inherits Window {
     in property <string> npub;
     in property <string> federation-status: "Not set";
     in property <[NotarizationItem]> notarizations;
+    in property <string> reputation: "0";
 
     // ---- wallet ----
     in property <bool> wallet-connected: false;
@@ -1579,6 +1607,7 @@ export component MainWindow inherits Window {
                 npub: root.npub;
                 federation-status: root.federation-status;
                 notarizations: root.notarizations;
+                reputation: root.reputation;
                 back => { root.back-home(); }
                 add-relay(u) => { root.add-relay(u); }
                 remove-relay(u) => { root.remove-relay(u); }

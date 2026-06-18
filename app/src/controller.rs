@@ -141,6 +141,8 @@ struct ViewState {
     /// Proof-of-burn notarizations we've initiated (most-recent first), shown in
     /// Settings with a tap-to-open-on-mempool.space action.
     notarizations: Vec<Notarization>,
+    /// Our total confirmed-burn reputation (sats), shown above the list.
+    reputation_sats: u64,
 
     /// Driver's current sort (the snapshot doesn't carry it; we mirror it from
     /// the SetSort we send so the toggle highlights correctly).
@@ -171,6 +173,7 @@ impl Default for ViewState {
             npub: String::new(),
             federation_invite: String::new(),
             notarizations: Vec::new(),
+            reputation_sats: 0,
             sort: SortKey::PickupDistance,
             toast: None,
             map: MapState::default(),
@@ -502,8 +505,13 @@ impl Controller {
             UiEvent::Toast(msg) => {
                 self.view.lock().unwrap().toast = Some((msg, Instant::now() + TOAST_DURATION));
             }
-            UiEvent::Notarizations(list) => {
-                self.view.lock().unwrap().notarizations = list;
+            UiEvent::Notarizations {
+                items,
+                reputation_sats,
+            } => {
+                let mut v = self.view.lock().unwrap();
+                v.notarizations = items;
+                v.reputation_sats = reputation_sats;
             }
         }
         self.refresh_map();
@@ -701,6 +709,7 @@ impl Controller {
                 .collect::<Vec<slint::SharedString>>(),
         )));
         ui.set_notarizations(notarizations_model(&view.notarizations));
+        ui.set_reputation(view.reputation_sats.to_string().into());
 
         // Copy the map view params out so the rest of render() can compute pin
         // offsets without holding a borrow of `view.map` across the UI setters.

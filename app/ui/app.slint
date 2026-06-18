@@ -27,6 +27,16 @@ export struct ChatItem {
     text: string,
 }
 
+// One proof-of-burn notarization (mirrors `engine::Notarization`). The full
+// `txid` is carried so a tap can open `mempool.space/tx/<txid>`.
+export struct NotarizationItem {
+    txid: string,
+    txid-short: string,   // abbreviated for display, e.g. "a1b2…f9e0"
+    label: string,        // "Identity bond" / "Ride" / "Boost"
+    amount: string,       // sats, e.g. "500"
+    confirmed: bool,
+}
+
 global Theme {
     out property <color> bg: #0f1117;
     out property <color> card: #1a1d27;
@@ -954,10 +964,12 @@ component SettingsScreen inherits Rectangle {
     in property <string> currency;
     in property <string> npub;
     in property <string> federation-status;
+    in property <[NotarizationItem]> notarizations;
     callback back();
     callback add-relay(string);
     callback remove-relay(string);
     callback set-federation(string);
+    callback open-notarization(string);
 
     VerticalLayout {
         BackBar { title: "Settings"; back => { root.back(); } }
@@ -1049,6 +1061,45 @@ component SettingsScreen inherits Rectangle {
                                 root.set-federation(fed-input.text);
                                 fed-input.text = "";
                             }
+                        }
+                    }
+                }
+
+                SectionTitle { text: "PROOF-OF-BURN"; }
+                Card {
+                    VerticalLayout {
+                        padding: 8px;
+                        spacing: 6px;
+                        if root.notarizations.length == 0 : Text {
+                            text: "No notarizations yet. Bonding your identity or completing rides burns a small amount to Bitcoin and builds your reputation.";
+                            color: Theme.muted;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                        for n in root.notarizations : HorizontalLayout {
+                            padding: 8px;
+                            spacing: 10px;
+                            VerticalLayout {
+                                horizontal-stretch: 1;
+                                spacing: 2px;
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    alignment: start;
+                                    Text { text: n.label; color: Theme.text; font-size: 14px; font-weight: 700; }
+                                    Text {
+                                        text: n.confirmed ? "✓ confirmed" : "⏳ mempool";
+                                        color: n.confirmed ? Theme.accent : Theme.muted;
+                                        font-size: 11px;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                Text {
+                                    text: n.amount + " sat · " + n.txid-short;
+                                    color: Theme.muted;
+                                    font-size: 12px;
+                                }
+                            }
+                            SmallButton { text: "Open ↗"; clicked => { root.open-notarization(n.txid); } }
                         }
                     }
                 }
@@ -1341,6 +1392,7 @@ export component MainWindow inherits Window {
     in property <[string]> relays;
     in property <string> npub;
     in property <string> federation-status: "Not set";
+    in property <[NotarizationItem]> notarizations;
 
     // ---- wallet ----
     in property <bool> wallet-connected: false;
@@ -1391,6 +1443,7 @@ export component MainWindow inherits Window {
     callback add-relay(string);
     callback remove-relay(string);
     callback set-federation(string);
+    callback open-notarization(string);
 
     // wallet
     callback open-wallet();
@@ -1525,10 +1578,12 @@ export component MainWindow inherits Window {
                 currency: root.currency;
                 npub: root.npub;
                 federation-status: root.federation-status;
+                notarizations: root.notarizations;
                 back => { root.back-home(); }
                 add-relay(u) => { root.add-relay(u); }
                 remove-relay(u) => { root.remove-relay(u); }
                 set-federation(i) => { root.set-federation(i); }
+                open-notarization(t) => { root.open-notarization(t); }
             }
 
             if root.screen == 7 : WalletScreen {

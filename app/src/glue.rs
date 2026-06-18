@@ -218,6 +218,19 @@ impl Platform for AndroidPlatform {
         });
     }
 
+    fn open_url(&self, url: &str) {
+        self.with_env("openUrl", |env, class| {
+            let jurl = env.new_string(url)?;
+            env.call_static_method(
+                class,
+                "openUrl",
+                "(Ljava/lang/String;)V",
+                &[JValue::Object(&jurl)],
+            )
+            .map(|_| ())
+        });
+    }
+
     fn notify(&self, title: &str, body: &str) {
         self.with_env("notify", |env, class| {
             let jtitle = env.new_string(title)?;

@@ -39,6 +39,10 @@ pub trait Platform: Send + Sync + 'static {
     /// (`lat`,`lng`) labelled `label` (Android `ACTION_VIEW` on a `geo:` URI).
     /// Fire-and-forget.
     fn open_nav(&self, lat: f64, lng: f64, label: &str);
+    /// Open a web `url` in the system browser (Android `ACTION_VIEW` on the
+    /// `https:` URI) — used to inspect a proof-of-burn notarization transaction
+    /// on a block explorer. Fire-and-forget.
+    fn open_url(&self, url: &str);
     /// Raise a notification the user should see even when the app is backgrounded
     /// (a match found, a driver arriving). Fire-and-forget.
     fn notify(&self, title: &str, body: &str);

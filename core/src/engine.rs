@@ -163,6 +163,24 @@ pub struct DriverSnapshot {
     pub messages: Vec<ChatMessage>,
 }
 
+/// A proof-of-burn notarization we initiated — surfaced to the UI so the user
+/// can inspect the Bitcoin transaction (e.g. open it on a block explorer like
+/// mempool.space).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Notarization {
+    /// Notarization transaction id, display hex (what `mempool.space/tx/<txid>`
+    /// expects). Empty only for a not-yet-broadcast proof.
+    pub txid: String,
+    /// What the burn was for: `"Identity bond"`, `"Ride"`, or `"Boost"`.
+    pub label: String,
+    /// Sats burnt for this event (its leaf value).
+    pub amount_sats: u64,
+    /// Confirmed in a block (vs still in the mempool).
+    pub confirmed: bool,
+    /// Engine-clock unix seconds when we recorded it.
+    pub at: u64,
+}
+
 /// What the engine renders to the UI.
 #[derive(Clone, Debug)]
 pub enum UiEvent {
@@ -172,6 +190,9 @@ pub enum UiEvent {
     /// Ask the platform to start/stop GPS.
     NeedLocation(bool),
     Toast(String),
+    /// Our proof-of-burn notarizations, most-recent first (for a transparency
+    /// list the user can open on a block explorer).
+    Notarizations(Vec<Notarization>),
 }
 
 // ---- Internal state --------------------------------------------------------
@@ -245,6 +266,8 @@ pub struct Engine<P: Pool> {
     rep_threshold: u64,
     /// Sats to burn on each completed ride (`0` = no per-ride burn).
     ride_burn_sats: u64,
+    /// Notarizations we've initiated, most-recent first (surfaced to the UI).
+    notarizations: Vec<Notarization>,
 }
 
 impl<P: Pool> Engine<P> {
@@ -291,6 +314,7 @@ impl<P: Pool> Engine<P> {
             reputation: ReputationLedger::new(),
             rep_threshold,
             ride_burn_sats,
+            notarizations: Vec::new(),
         }
     }
 
@@ -817,15 +841,29 @@ impl<P: Pool> Engine<P> {
                         counterparty,
                     },
                 );
-                let what = match purpose {
-                    BurnPurpose::Bond => "bond",
-                    BurnPurpose::Ride => "ride",
-                    BurnPurpose::Boost => "boost",
+                let (toast_what, label) = match purpose {
+                    BurnPurpose::Bond => ("bond", "Identity bond"),
+                    BurnPurpose::Ride => ("ride", "Ride"),
+                    BurnPurpose::Boost => ("boost", "Boost"),
                 };
                 self.emit(UiEvent::Toast(format!(
-                    "{what} reputation +{} sat",
+                    "{toast_what} reputation +{} sat",
                     proof.leaf_value_msat / 1000
                 )));
+                // Record the notarization tx for the transparency list.
+                const MAX_NOTARIZATIONS: usize = 50;
+                self.notarizations.insert(
+                    0,
+                    Notarization {
+                        txid: proof.txid.clone(),
+                        label: label.to_string(),
+                        amount_sats: proof.leaf_value_msat / 1000,
+                        confirmed: proof.is_confirmed(),
+                        at: self.now,
+                    },
+                );
+                self.notarizations.truncate(MAX_NOTARIZATIONS);
+                self.emit(UiEvent::Notarizations(self.notarizations.clone()));
                 self.emit_current();
             }
             BurnOutcome::Failed { reason, .. } => {
@@ -1525,6 +1563,28 @@ mod tests {
         assert_eq!(last.kind, Kind::Custom(protocol::KIND_UPVOTING_EVENT));
         // …and credit ourselves locally.
         assert_eq!(h.engine.reputation_sats(&keys.public_key().to_hex()), 500);
+    }
+
+    #[test]
+    fn proven_burn_surfaces_a_notarization_for_the_ui() {
+        let (mut h, _burn, mut brx, _k) = burn_harness(0, 0);
+        h.engine.handle(EngineCmd::Tick { now: 1000 });
+        h.engine.handle(EngineCmd::PublishBond { amount_sats: 500 });
+        pump_burn(&mut h, &mut brx);
+
+        // The engine emits a Notarizations snapshot the UI can list + open.
+        let mut list = None;
+        while let Ok(ev) = h.ui.try_recv() {
+            if let UiEvent::Notarizations(n) = ev {
+                list = Some(n);
+            }
+        }
+        let list = list.expect("a Notarizations UiEvent");
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].label, "Identity bond");
+        assert_eq!(list[0].amount_sats, 500);
+        assert!(list[0].confirmed);
+        assert_eq!(list[0].txid.len(), 64); // a 32-byte txid in display hex
     }
 
     #[test]

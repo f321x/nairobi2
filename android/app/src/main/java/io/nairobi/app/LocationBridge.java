@@ -257,6 +257,27 @@ public final class LocationBridge {
         });
     }
 
+    /**
+     * Open a web URL in the system browser — used to inspect a proof-of-burn
+     * notarization transaction on a block explorer (e.g. mempool.space).
+     */
+    public static void openUrl(final String url) {
+        final Context ctx = locationContext();
+        if (ctx == null) {
+            Log.w(TAG, "openUrl: no context");
+            return;
+        }
+        post(() -> {
+            try {
+                Intent view = new Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                ctx.startActivity(view);
+            } catch (Exception e) {
+                Log.e(TAG, "openUrl failed: " + e);
+            }
+        });
+    }
+
     // ---- notifications -----------------------------------------------------
 
     /**

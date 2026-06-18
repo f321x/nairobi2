@@ -19,8 +19,8 @@ use nairobi_core::burn::notary::NotaryClient;
 use nairobi_core::burn::service::{BurnService, NotaryBurnService};
 use nairobi_core::config::{ConfigStore, DEFAULT_CURRENCY};
 use nairobi_core::engine::{
-    DriverPhase, DriverSnapshot, Engine, EngineCmd, Offer, PassengerPhase, PassengerSnapshot,
-    SortKey, UiEvent,
+    DriverPhase, DriverSnapshot, Engine, EngineCmd, Notarization, Offer, PassengerPhase,
+    PassengerSnapshot, SortKey, UiEvent,
 };
 use nairobi_core::geo::routing;
 use nairobi_core::geo::LatLng;
@@ -33,7 +33,7 @@ use tokio::sync::mpsc;
 
 use crate::map::{self, MapState};
 use crate::platform::{Platform, PlatformEvent};
-use crate::{ChatItem, MainWindow, OfferItem};
+use crate::{ChatItem, MainWindow, NotarizationItem, OfferItem};
 
 const TOAST_DURATION: Duration = Duration::from_secs(3);
 /// Steps the rate steppers move by, per tap (whole currency units / km).
@@ -138,6 +138,9 @@ struct ViewState {
     npub: String,
     /// The configured Fedimint federation invite (empty = none yet).
     federation_invite: String,
+    /// Proof-of-burn notarizations we've initiated (most-recent first), shown in
+    /// Settings with a tap-to-open-on-mempool.space action.
+    notarizations: Vec<Notarization>,
 
     /// Driver's current sort (the snapshot doesn't carry it; we mirror it from
     /// the SetSort we send so the toggle highlights correctly).
@@ -167,6 +170,7 @@ impl Default for ViewState {
             relays: Vec::new(),
             npub: String::new(),
             federation_invite: String::new(),
+            notarizations: Vec::new(),
             sort: SortKey::PickupDistance,
             toast: None,
             map: MapState::default(),
@@ -498,6 +502,9 @@ impl Controller {
             UiEvent::Toast(msg) => {
                 self.view.lock().unwrap().toast = Some((msg, Instant::now() + TOAST_DURATION));
             }
+            UiEvent::Notarizations(list) => {
+                self.view.lock().unwrap().notarizations = list;
+            }
         }
         self.refresh_map();
         self.schedule_render();
@@ -693,6 +700,7 @@ impl Controller {
                 .map(|r| r.clone().into())
                 .collect::<Vec<slint::SharedString>>(),
         )));
+        ui.set_notarizations(notarizations_model(&view.notarizations));
 
         // Copy the map view params out so the rest of render() can compute pin
         // offsets without holding a borrow of `view.map` across the UI setters.
@@ -1047,6 +1055,13 @@ impl Controller {
         hook!(on_set_federation, |ctrl, invite: slint::SharedString| {
             ctrl.set_federation(invite.trim().to_string());
         });
+        hook!(on_open_notarization, |ctrl, txid: slint::SharedString| {
+            let txid = txid.trim();
+            if !txid.is_empty() {
+                ctrl.platform
+                    .open_url(&format!("https://mempool.space/tx/{txid}"));
+            }
+        });
 
         // ---- wallet ----
         hook!(on_open_wallet, |ctrl| {
@@ -1376,6 +1391,30 @@ fn offers_model(offers: &[Offer]) -> slint::ModelRc<OfferItem> {
     slint::ModelRc::new(slint::VecModel::from(items))
 }
 
+fn notarizations_model(items: &[Notarization]) -> slint::ModelRc<NotarizationItem> {
+    let rows: Vec<NotarizationItem> = items
+        .iter()
+        .map(|n| NotarizationItem {
+            txid: n.txid.clone().into(),
+            txid_short: short_txid(&n.txid).into(),
+            label: n.label.clone().into(),
+            amount: n.amount_sats.to_string().into(),
+            confirmed: n.confirmed,
+        })
+        .collect();
+    slint::ModelRc::new(slint::VecModel::from(rows))
+}
+
+/// Abbreviate a txid for display: `"a1b2c3d4…7e8f9a0b"` (or the whole thing when
+/// it's already short).
+fn short_txid(txid: &str) -> String {
+    if txid.len() <= 18 {
+        txid.to_string()
+    } else {
+        format!("{}…{}", &txid[..8], &txid[txid.len() - 8..])
+    }
+}
+
 fn chat_model(messages: &[nairobi_core::engine::ChatMessage]) -> slint::ModelRc<ChatItem> {
     let items: Vec<ChatItem> = messages
         .iter()
@@ -1397,6 +1436,14 @@ mod tests {
         assert_eq!(fmt_clock(5), "0:05");
         assert_eq!(fmt_clock(83), "1:23");
         assert_eq!(fmt_clock(600), "10:00");
+    }
+
+    #[test]
+    fn txid_is_abbreviated_for_display() {
+        let txid = "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b";
+        assert_eq!(short_txid(txid), "4a5e1e4b…fdeda33b");
+        // Short strings pass through unchanged.
+        assert_eq!(short_txid("deadbeef"), "deadbeef");
     }
 
     #[test]

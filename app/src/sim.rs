@@ -81,6 +81,11 @@ impl Platform for SimPlatform {
         );
     }
 
+    fn open_url(&self, url: &str) {
+        // No browser hand-off on the desktop sim; log it so the flow is visible.
+        log::info!("sim: open url {url}");
+    }
+
     fn notify(&self, title: &str, body: &str) {
         // The desktop build has no notification surface; log it loudly so the
         // match/arrival flows can still be exercised on a workstation.

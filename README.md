@@ -5,7 +5,13 @@ A **permissionless, fully Nostr-native ridesharing app** for Android, in **Rust 
 No company, no server, no accounts, no platform fee — just riders and drivers meeting over the
 open [Nostr](https://nostr.com) network and paying **cash, peer-to-peer**, in person.
 
-<p align="center"><img src="docs/screenshots/home.png" alt="nairobi2 home screen" width="260"></p>
+<p align="center">
+  <img src="docs/screenshots/home.png" width="240" alt="Home — rider or driver">
+  <img src="docs/screenshots/request.png" width="240" alt="Request a ride — OSM map, tap to set drop-off, escalating rate">
+  <img src="docs/screenshots/driver.png" width="240" alt="Nearby rides — driver offer list">
+</p>
+
+<p align="center"><sub>Running under a virtual display (Slint software renderer). Left→right: Home, the map-first ride request (real OpenStreetMap tiles + GPS pin + escalating-rate steppers), and the driver's nearby-rides list.</sub></p>
 
 ## How it works
 

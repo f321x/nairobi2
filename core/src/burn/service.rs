@@ -267,23 +267,34 @@ const FETCH_DEADLINE: Duration = Duration::from_secs(5 * 60);
 /// this elapses stays persisted and resumes on the next launch.
 const CONFIRM_DEADLINE: Duration = Duration::from_secs(60 * 60);
 
-/// The watch's decision for a freshly **verified** proof. Pure, so the network
+/// The watch's decision for a freshly fetched proof. Pure, so the network
 /// loop's policy is unit-tested even though the loop itself does live I/O.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct WatchDecision {
-    /// (Re-)emit a `Proven` outcome. True on the first verified proof and
-    /// whenever the txid changes (RBF) or it confirms, so the ledger always
-    /// reflects the current proof. The engine de-noises — it only toasts /
-    /// re-publishes on a genuine state change, not a bare txid refresh.
+    /// (Re-)emit a `Proven` outcome. True on the first proof and whenever the
+    /// txid changes (RBF) or it confirms, so the ledger always reflects the
+    /// current proof. The engine de-noises — it only toasts / re-publishes on a
+    /// genuine state change, not a bare txid refresh.
     emit: bool,
     /// The watch is finished (confirmed, or a boost that only needs mempool).
     done: bool,
 }
 
-/// Decide whether to (re-)emit and whether to stop, given the verified proof's
+/// Decide whether to (re-)emit and whether to stop, given the proof's
 /// `confirmed` flag, whether its `txid` differs from the one last emitted (RBF),
-/// and whether this is a boost. The Merkle root is **always** verified against
-/// the on-chain tx before this is reached (see [`NotaryBurnService::fetch_and_verify`]).
+/// and whether this is a boost.
+///
+/// For one of *our own* burns we surface the notary's proof directly — the
+/// mempool one as provisional (pending), the confirmed one as durable. We do
+/// **not** gate this on a client-side Electrum check: a just-broadcast /
+/// RBF-churning notary batch tx is routinely unfetchable by exact txid, and
+/// port-50002 Electrum servers are frequently unreachable on mobile, so gating
+/// on them is exactly what kept a paid bond stuck at a 0 balance. Trust here is
+/// liveness-only (the notary actually burns the funds), matching the design's
+/// trust model — and any *counterparty* still independently verifies our
+/// published kind-30021 proof on-chain (see [`NotaryBurnService::verify_incoming`],
+/// the actual anti-Sybil boundary). Confirmed-only still gates *durable*
+/// reputation in the engine's ledger; the mempool proof only shows as pending.
 fn watch_decision(confirmed: bool, txid_changed: bool, is_boost: bool) -> WatchDecision {
     WatchDecision {
         emit: txid_changed || confirmed,
@@ -352,20 +363,21 @@ impl NotaryBurnService {
         Err(last)
     }
 
-    /// Watch one burn (by notary `rhash`) to confirmation: poll `get_proof`,
-    /// **always verify the Merkle root** against the current on-chain tx, and
-    /// (re-)emit a `Proven` whenever the proof first verifies, its txid changes
-    /// (RBF), or it confirms — persisting the latest state so the balance
-    /// survives a restart. `last_txid` is `None` for a fresh burn (drives the
+    /// Watch one burn (by notary `rhash`) to confirmation: poll `get_proof` and
+    /// (re-)emit a `Proven` whenever the notary first returns a proof, its txid
+    /// changes (RBF), or it confirms — persisting the latest state so the balance
+    /// survives a restart. The mempool proof is surfaced as provisional the
+    /// moment the notary returns it (no Electrum gate — see [`watch_decision`]),
+    /// so a paid bond shows a pending balance within seconds; the confirmed proof
+    /// upgrades it to durable. `last_txid` is `None` for a fresh burn (drives the
     /// fast-poll + fetch deadline) and the persisted txid when resuming.
     /// `report_failures` is `true` for a fresh burn (the user is waiting on the
-    /// payment they just made, so a timeout / notary error is surfaced as a
-    /// toast) and `false` for a background resume on startup (stop silently — an
-    /// old watch that can't make progress shouldn't toast a failure out of the
-    /// blue; the balance it already seeded stays as-is).
+    /// payment they just made, so a timeout is surfaced as a toast) and `false`
+    /// for a background resume on startup (stop silently — an old watch that
+    /// can't make progress shouldn't toast a failure out of the blue; the balance
+    /// it already seeded stays as-is).
     #[allow(clippy::too_many_arguments)]
     async fn run_watch(
-        electrum: Vec<ElectrumServer>,
         notary: NotaryClient,
         burns: Arc<BurnStore>,
         tx: UnboundedSender<BurnOutcome>,
@@ -399,35 +411,24 @@ impl NotaryBurnService {
 
             let p = match notary.get_proof(&rhash).await {
                 Ok(Some(p)) => p,
+                // Still waiting for the payment to settle / the batch to build.
                 Ok(None) => continue,
                 Err(e) => {
-                    // A transient notary hiccup must not nuke a surfaced burn;
-                    // only fail a fresh one before anything is shown.
-                    log::debug!("get_proof: {e}");
-                    if surfaced {
-                        continue;
-                    }
-                    if report_failures {
-                        let _ = tx.send(fail(format!("get_proof: {e}")));
-                    }
-                    return;
+                    // A transient notary/transport hiccup must never kill a burn
+                    // the user already paid for — retry until a deadline fires.
+                    // (`get_proof` only errors on a non-"waiting" notary error or
+                    // a network blip; both are worth re-polling, not bailing on.)
+                    log::debug!("get_proof({rhash}): {e}");
+                    continue;
                 }
             };
-            // ALWAYS verify the Merkle root against the current on-chain tx
-            // (Part B). A just-broadcast / RBF-replaced tx may momentarily be
-            // unfetchable — treat that as "not ready" and retry rather than
-            // surfacing an unverified amount.
-            if let Err(e) = Self::fetch_and_verify(&electrum, &p).await {
-                log::debug!("burn proof not yet verifiable: {e}");
-                continue;
-            }
             let confirmed = p.is_confirmed();
             let txid_changed = last_txid.as_deref() != Some(p.txid.as_str());
             let decision = watch_decision(confirmed, txid_changed, purpose == BurnPurpose::Boost);
             if decision.emit {
-                // Persist the latest verified state (leaf is stable across RBF;
-                // txid is refreshed) so the balance survives a restart and an
-                // unconfirmed burn resumes by rhash next launch.
+                // Persist the latest state (leaf is stable across RBF; txid is
+                // refreshed) so the balance survives a restart and an unconfirmed
+                // burn resumes by rhash next launch.
                 let _ = burns.upsert(PersistedBurn {
                     rhash: rhash.clone(),
                     event_id: event_id_hex.clone(),
@@ -463,7 +464,6 @@ impl BurnService for NotaryBurnService {
         let keys = self.keys.clone();
         let wallet = self.wallet.clone();
         let notary = self.notary.clone();
-        let electrum = self.electrum.clone();
         let burns = self.burns.clone();
         let tx = self.tx.clone();
         let max_fee = self.max_fee;
@@ -521,13 +521,13 @@ impl BurnService for NotaryBurnService {
                 confirmed: false,
             });
 
-            // Watch to confirmation: get_proof → verify Merkle root → emit. The
-            // notary first returns a mempool proof (block_height == 0, within
-            // seconds), RBF-replaces the txid repeatedly, then confirms a block
-            // much later; the watch surfaces each verified state (deduped by the
-            // stable leaf hash) and persists it.
+            // Watch to confirmation: get_proof → emit. The notary first returns a
+            // mempool proof (block_height == 0, within seconds) which we surface
+            // as pending, RBF-replaces the txid repeatedly (we refresh it), then
+            // confirms a block much later (we upgrade it to durable); the watch
+            // surfaces each state (deduped by the stable leaf hash) and persists
+            // it so the balance survives a restart.
             Self::run_watch(
-                electrum,
                 notary,
                 burns,
                 tx,
@@ -536,7 +536,7 @@ impl BurnService for NotaryBurnService {
                 req.purpose,
                 req.counterparty,
                 None,
-                true, // fresh burn — surface a timeout/error to the waiting user
+                true, // fresh burn — surface a timeout to the waiting user
             )
             .await;
         });
@@ -548,7 +548,6 @@ impl BurnService for NotaryBurnService {
             return;
         }
         let notary = self.notary.clone();
-        let electrum = self.electrum.clone();
         let burns = self.burns.clone();
         let tx = self.tx.clone();
         self.handle.spawn(async move {
@@ -557,7 +556,6 @@ impl BurnService for NotaryBurnService {
             // RBF txid change or the confirmation — the amount was already seeded.
             let last_txid = (!burn.txid.is_empty()).then(|| burn.txid.clone());
             Self::run_watch(
-                electrum,
                 notary,
                 burns,
                 tx,

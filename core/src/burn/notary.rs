@@ -142,6 +142,46 @@ mod tests {
         assert!(parse_add_request(r#"{"error":"bad signature"}"#).is_err());
     }
 
+    /// Live smoke test against the public notary (`notary.electrum.org`),
+    /// exercising our real HTTPS client + parsers end to end: `add_request`
+    /// returns a payable BOLT-11 invoice + `rhash`, and `get_proof` on the
+    /// freshly-created (unpaid) request returns `Ok(None)` ("Waiting for
+    /// payment") — the exact path [`crate::burn::service::NotaryBurnService`]'s
+    /// watch loop relies on to keep polling instead of bailing. `#[ignore]`d
+    /// (needs network); run with `cargo test -p nairobi-core --
+    /// --ignored notary_live`.
+    #[tokio::test]
+    #[ignore = "hits the live notary over the network"]
+    async fn notary_live_add_request_then_waiting() {
+        let notary = NotaryClient::public();
+        let event_id = to_hex(&[0x5au8; 32]);
+        let nonce = to_hex(&[0x42u8; 32]);
+        let added = match notary.add_request(&event_id, 1, &nonce, None).await {
+            Ok(a) => a,
+            // A *transport* error ([`Error::Geo`]: connect/TLS/read) means we
+            // can't reach the real notary cleanly from here — e.g. offline, or
+            // behind a TLS-intercepting egress proxy whose CA isn't in
+            // `webpki-roots` (as in the CI sandbox). That's an environment
+            // limitation, not a notary-contract failure, so skip rather than
+            // false-fail. A notary-level rejection ([`Error::Burn`]) still fails.
+            Err(Error::Geo(e)) => {
+                eprintln!("skipping notary_live (cannot reach notary: {e})");
+                return;
+            }
+            Err(e) => panic!("add_request rejected by the notary: {e}"),
+        };
+        assert!(added.invoice.starts_with("lnbc"), "invoice: {}", added.invoice);
+        assert!(!added.rhash.is_empty());
+
+        // Unpaid → the notary replies "Waiting for payment", which our parser
+        // maps to Ok(None) so the watch keeps polling (vs. an error that bails).
+        let proof = notary
+            .get_proof(&added.rhash)
+            .await
+            .expect("get_proof should not error on a waiting request");
+        assert!(proof.is_none(), "unpaid request should be 'waiting', got a proof");
+    }
+
     #[test]
     fn get_proof_distinguishes_waiting_from_ready() {
         // Waiting → Ok(None).

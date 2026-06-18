@@ -18,6 +18,7 @@
 //! pure and unit-tested.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -35,6 +36,13 @@ use crate::geo::http::ensure_crypto_provider;
 
 /// Default Electrum SSL port.
 pub const DEFAULT_ELECTRUM_PORT: u16 = 50002;
+
+/// Hard cap on a single Electrum round trip (connect + TLS handshake + request +
+/// response). Public Electrum servers are flaky and port 50002 is often blocked
+/// outright on mobile networks, where a bare `TcpStream::connect` can hang on the
+/// OS timeout for minutes; this bounds every call so a dead server can't stall
+/// the verification task (e.g. [`crate::burn::service::NotaryBurnService::verify_incoming`]).
+const CALL_TIMEOUT: Duration = Duration::from_secs(12);
 
 /// `host:port` of an Electrum server (TLS).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -83,9 +91,17 @@ impl ElectrumClient {
         }
     }
 
+    /// One JSON-RPC round trip, bounded by [`CALL_TIMEOUT`] so an unreachable or
+    /// silently-dropping server can't hang the caller.
+    async fn call(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
+        tokio::time::timeout(CALL_TIMEOUT, self.call_inner(method, params))
+            .await
+            .map_err(|_| Error::Burn(format!("electrum {} timed out", self.server.host)))?
+    }
+
     /// One JSON-RPC round trip: connect, send `{method, params}\n`, read one
     /// response line, return its `result` value.
-    async fn call(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
+    async fn call_inner(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
         let req = serde_json::json!({"id": 0, "method": method, "params": params});
         let line = format!("{req}\n");
 

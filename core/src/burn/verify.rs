@@ -260,4 +260,59 @@ mod tests {
         let v = verify_proof_against_tx(&proof, &raw, Some(900_000)).unwrap();
         assert_eq!(v.confirmations, 0);
     }
+
+    /// A **real** mempool proof + notarization tx captured live from
+    /// `notary.electrum.org` (a kind-30021 event on `relay.damus.io`, batch txid
+    /// `4d4e7325…`). This is the only test exercising the full pure pipeline —
+    /// leaf hash, root reconstruction, SegWit tx parse (real witness + P2WPKH
+    /// change), commitment binding — against bytes the notary actually produced,
+    /// not a synthetic fixture. If the notary changes its serialization this is
+    /// the canary.
+    #[test]
+    fn verifies_a_real_notary_mempool_proof() {
+        use crate::burn::proof::proof_from_parts;
+
+        // Raw notarization tx (mempool), as `blockchain.transaction.get` returns.
+        let raw = from_hex(
+            "02000000000101360d2fca24129c62c35257a08e7537cdc9dc153cda863fa7f6b5a225bbdbb14d\
+             0200000000fdffffff030000000000000000266a240021b2968b09579c970d9d2116159de0d4a7\
+             fa219fd0af90a1e2c43b3b0d0cd382a800904a01000000000000220020f5cf21e2eaf2b5c8945a\
+             c0bb7ebf0d25404b249290bc723747c1380d9c02b1bf422d3c0000000000160014d5c2e02a528b\
+             63b5ccd0f3777e49bb7eb8c851cd02473044022075821651768cafb39b746b80052dae04bbad68\
+             45df2b4edd1b09e70839fdc17c02201ec7a0a7d6ff29110597cd581f99015699d87d04143774d9\
+             e26cb6719a8c49b8012102aa493854dfe179162cc606707808f8e611c22ed86913c83d13227b04\
+             cca548a1af8f0e00",
+        )
+        .unwrap();
+
+        let proof = proof_from_parts(
+            0,
+            Some("6fe28c0ab6f1b372c1a6a246ae63f74f931e8365e15a089c68d6190000000000".into()),
+            "dbfc1e8f3ecfbd0a875819e8e210b8bf9f9ba3c2e249b4929375ebfed1568c3b",
+            "4d4e732582772f1668071de44398044b1f438c3b3bad2034c0d4ff2dd03d5432",
+            0,
+            "55fb6a663456d0e85aff17ecf8b3198794a53004aa4baf94d70cb264e0374e1e",
+            2000,
+            1,
+            "7efe03574c17e010b3c8dd6e830c266bfb6caa18c9f7b6f3b94137a58e811d3c:2000,\
+             5e95ecea764968048c7556c7106974955f1807c138925f78855e05de02cb687b:10000,\
+             e8f67ce51cc581583f14844dd89a8a38272e2f6a65ac69859212e282da604e28:316000",
+            None,
+        )
+        .unwrap();
+
+        // The leaf hash our primitives compute must equal the `d` tag the notary
+        // published — a direct cross-check of `leaf_hash` against real bytes.
+        assert_eq!(
+            to_hex(&proof.leaf_hash()),
+            "bb7d3b8968adaa2e4755c73d23aee346d5de9eb23f6def44cb0a17f90c51a20e"
+        );
+
+        let v = verify_proof_against_tx(&proof, &raw, None).unwrap();
+        assert_eq!(v.leaf_value_msat, 2000);
+        assert_eq!(v.burn_value_sats, 330); // P2WSH burn output (vout[1])
+        assert_eq!(v.csv_delay, 144);
+        assert_eq!(v.confirmations, 0); // mempool
+        assert!(!v.upvoter_verified); // anonymous batch leaf
+    }
 }

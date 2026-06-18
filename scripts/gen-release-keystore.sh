@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
-# Generate a persistent release signing keystore using the builder image's JDK
-# (no host JDK needed). Runs INSIDE the nairobi-builder container.
+# Generate a persistent release signing keystore.
 # Output: release-signing/nairobi-release.jks
+#
+# Preferred: `./build.sh keystore` — runs this inside the builder container, so
+# no host JDK is needed. You may also run it directly on the host if you have a
+# JDK (`keytool`) installed.
 #
 # Required env:
 #   NAIROBI_KEYSTORE_PASSWORD   keystore password
@@ -10,7 +13,9 @@
 #   NAIROBI_KEY_PASSWORD        key password (default: = keystore password)
 
 set -euo pipefail
-cd /work
+# Resolve the repo root so this works both inside the container (cwd /work) and
+# when invoked directly from the host as ./scripts/gen-release-keystore.sh.
+cd "$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 
 OUT_DIR=release-signing
 KEYSTORE="$OUT_DIR/nairobi-release.jks"

@@ -5745,6 +5745,7 @@ dependencies = [
  "fedimint-core",
  "fedimint-cursed-redb",
  "fedimint-ln-client",
+ "fedimint-ln-common",
  "fedimint-mint-client",
  "fedimint-wallet-client",
  "futures",

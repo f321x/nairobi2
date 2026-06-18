@@ -21,6 +21,7 @@ fedimint = [
     "dep:fedimint-client",
     "dep:fedimint-core",
     "dep:fedimint-ln-client",
+    "dep:fedimint-ln-common",
     "dep:fedimint-wallet-client",
     "dep:fedimint-mint-client",
     "dep:fedimint-api-client",
@@ -42,6 +43,7 @@ futures = { version = "0.3", optional = true }
 fedimint-client = { version = "0.11", optional = true }
 fedimint-core = { version = "0.11", optional = true }
 fedimint-ln-client = { version = "0.11", optional = true }
+fedimint-ln-common = { version = "0.11", optional = true }
 fedimint-wallet-client = { version = "0.11", optional = true }
 fedimint-mint-client = { version = "0.11", optional = true }
 fedimint-api-client = { version = "0.11", optional = true }

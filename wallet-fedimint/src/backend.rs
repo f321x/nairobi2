@@ -35,6 +35,7 @@ use fedimint_core::Amount as FmAmount;
 use fedimint_ln_client::{
     LightningClientInit, LightningClientModule, LnPayState, LnReceiveState,
 };
+use fedimint_ln_common::LightningGateway;
 use fedimint_mint_client::MintClientInit;
 use fedimint_wallet_client::{WalletClientInit, WalletClientModule, WithdrawState};
 
@@ -258,6 +259,41 @@ async fn emit_balance(client: &ClientHandle, tx: &UnboundedSender<WalletEvent>) 
     }
 }
 
+/// Pick a usable Lightning gateway for this federation.
+///
+/// `get_gateway(None, false)` only returns a gateway once the federation has
+/// announced **and** activated a default one; on federations that announce none
+/// (or none yet) it yields `None`, which is why the notary's Lightning invoice
+/// could not be paid. So we mirror what the reference Fedimint "ecash" client
+/// does: refresh the announced-gateway cache, take the active one if present,
+/// otherwise discover one from the announced set (preferring vetted gateways),
+/// and finally fall back to the federation's internal gateway. The chosen
+/// gateway is what `create_bolt11_invoice` / `pay_bolt11_invoice` need.
+async fn discover_gateway(
+    ln: &ClientModuleInstance<'_, LightningClientModule>,
+) -> Option<LightningGateway> {
+    // Pull the federation's current gateway announcements into the cache.
+    if let Err(e) = ln.update_gateway_cache().await {
+        log::warn!("update gateway cache: {e}");
+    }
+    // Prefer an already-active external gateway.
+    if let Ok(Some(gw)) = ln.get_gateway(None, false).await {
+        return Some(gw);
+    }
+    // The federation announced no active gateway — discover one from the
+    // announced list, vetted gateways first.
+    let mut announcements = ln.list_gateways().await;
+    announcements.sort_by_key(|a| !a.vetted);
+    for ann in &announcements {
+        if let Ok(Some(gw)) = ln.get_gateway(Some(ann.info.gateway_id), false).await {
+            return Some(gw);
+        }
+    }
+    // Last resort: the federation's internal gateway (works for mints that run
+    // their own Lightning and announce nothing externally).
+    ln.get_gateway(None, true).await.ok().flatten()
+}
+
 /// Create a BOLT-11 invoice for `amount`, returning `(invoice, operation id)`.
 async fn create_invoice(
     client: &ClientHandle,
@@ -266,8 +302,7 @@ async fn create_invoice(
 ) -> Result<(String, OperationId)> {
     let ln = ln(client)?;
     // Make sure we know a gateway to receive over Lightning.
-    let _ = ln.update_gateway_cache().await;
-    let gateway = ln.get_gateway(None, false).await.ok().flatten();
+    let gateway = discover_gateway(&ln).await;
     let desc = lightning_invoice::Bolt11InvoiceDescription::Direct(
         lightning_invoice::Description::new(description.to_string())
             .context("invoice description")?,
@@ -315,8 +350,10 @@ async fn pay_bolt11(client: &ClientHandle, bolt11: &str, max_fee: Amount) -> Res
     let invoice = lightning_invoice::Bolt11Invoice::from_str(bolt11.trim())
         .map_err(|e| anyhow!("invalid invoice: {e}"))?;
     let ln = ln(client)?;
-    let _ = ln.update_gateway_cache().await;
-    let payment = ln.pay_bolt11_invoice(None, invoice, ()).await?;
+    // Discover a gateway to route the payment (the federation may not announce a
+    // default one); passing `None` here fails on such federations.
+    let gateway = discover_gateway(&ln).await;
+    let payment = ln.pay_bolt11_invoice(gateway, invoice, ()).await?;
     let fee = Amount::from_msats(payment.fee.msats);
     if max_fee.msats() > 0 && fee.msats() > max_fee.msats() {
         log::warn!("lightning fee {fee} exceeds cap {max_fee}");

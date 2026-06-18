@@ -196,10 +196,13 @@ pub enum UiEvent {
     Toast(String),
     /// Our proof-of-burn notarizations (most-recent first) plus our current
     /// total confirmed-burn reputation in sats — a transparency view the user
-    /// can open on a block explorer.
+    /// can open on a block explorer. `pending_sats` is the additional burnt
+    /// amount still sitting in the mempool (unconfirmed); it does not yet count
+    /// toward gating but is shown so a fresh burn is visible immediately.
     Notarizations {
         items: Vec<Notarization>,
         reputation_sats: u64,
+        pending_sats: u64,
     },
 }
 
@@ -871,9 +874,13 @@ impl<P: Pool> Engine<P> {
                     },
                 );
                 self.notarizations.truncate(MAX_NOTARIZATIONS);
+                let me = self.me.to_hex();
+                let confirmed = self.reputation.score_sats(&me);
+                let provisional = self.reputation.provisional_sats(&me);
                 self.emit(UiEvent::Notarizations {
                     items: self.notarizations.clone(),
-                    reputation_sats: self.reputation.score_sats(&self.me.to_hex()),
+                    reputation_sats: confirmed,
+                    pending_sats: provisional.saturating_sub(confirmed),
                 });
                 self.emit_current();
             }
@@ -1600,19 +1607,68 @@ mod tests {
             if let UiEvent::Notarizations {
                 items,
                 reputation_sats,
+                pending_sats,
             } = ev
             {
-                snap = Some((items, reputation_sats));
+                snap = Some((items, reputation_sats, pending_sats));
             }
         }
-        let (items, reputation_sats) = snap.expect("a Notarizations UiEvent");
+        let (items, reputation_sats, pending_sats) = snap.expect("a Notarizations UiEvent");
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].label, "Identity bond");
         assert_eq!(items[0].amount_sats, 500);
         assert!(items[0].confirmed);
         assert_eq!(items[0].txid.len(), 64); // a 32-byte txid in display hex
-        // The confirmed bond counts toward the surfaced reputation total.
+        // The confirmed bond counts toward the surfaced reputation total, with
+        // nothing left pending in the mempool.
         assert_eq!(reputation_sats, 500);
+        assert_eq!(pending_sats, 0);
+    }
+
+    #[test]
+    fn mempool_burn_shows_as_pending_not_reputation() {
+        let (mut h, _burn, _brx, keys) = burn_harness(0, 0);
+        h.engine.handle(EngineCmd::Tick { now: 1000 });
+
+        // An unconfirmed (mempool) bond proof — `block_height == 0` — fed back.
+        let proof = crate::burn::proof::BurnProof {
+            version: crate::burn::PROOF_VERSION,
+            chain: None,
+            event_id: [1u8; 32],
+            leaf_value_msat: 700_000,
+            nonce: [0u8; 32],
+            merkle_hashes: Vec::new(),
+            merkle_index: 0,
+            txid: crate::burn::to_hex(&[0u8; 32]),
+            block_height: 0,
+            upvoter_pubkey: None,
+            upvoter_signature: None,
+        };
+        h.engine.handle(EngineCmd::Burn(BurnOutcome::Proven {
+            purpose: BurnPurpose::Bond,
+            proof: Box::new(proof),
+            counterparty: None,
+        }));
+
+        let mut snap = None;
+        while let Ok(ev) = h.ui.try_recv() {
+            if let UiEvent::Notarizations {
+                items,
+                reputation_sats,
+                pending_sats,
+            } = ev
+            {
+                snap = Some((items, reputation_sats, pending_sats));
+            }
+        }
+        let (items, reputation_sats, pending_sats) = snap.expect("a Notarizations UiEvent");
+        assert_eq!(items.len(), 1);
+        assert!(!items[0].confirmed); // surfaced as a mempool notarization
+        // Confirmed reputation stays 0, but the mempool burn shows as pending…
+        assert_eq!(reputation_sats, 0);
+        assert_eq!(pending_sats, 700);
+        // …and does not yet count toward the gate.
+        assert_eq!(h.engine.reputation_sats(&keys.public_key().to_hex()), 0);
     }
 
     #[test]

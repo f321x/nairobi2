@@ -1004,6 +1004,7 @@ component SettingsScreen inherits Rectangle {
     in property <string> federation-status;
     in property <[NotarizationItem]> notarizations;
     in property <string> reputation;   // total confirmed-burn sats
+    in property <string> reputation-pending;  // mempool (unconfirmed) sats, "" if none
     callback back();
     callback add-relay(string);
     callback remove-relay(string);
@@ -1124,8 +1125,13 @@ component SettingsScreen inherits Rectangle {
                             Text { text: root.reputation; color: Theme.accent; font-size: 36px; font-weight: 900; }
                             Text { text: "sat burnt"; color: Theme.muted; font-size: 14px; vertical-alignment: bottom; }
                         }
+                        if root.reputation-pending != "" : Text {
+                            text: "⏳ +" + root.reputation-pending + " sat pending in the mempool";
+                            color: Theme.muted;
+                            font-size: 12px;
+                        }
                         Text {
-                            text: "Bitcoin you've irreversibly burnt to back this identity. The more you burn, the more visible your requests are to others who filter spam by reputation.";
+                            text: "Bitcoin you've irreversibly burnt to back this identity. The more you burn, the more visible your requests are to others who filter spam by reputation. Pending burns still in the mempool count once confirmed.";
                             color: Theme.muted;
                             font-size: 11px;
                             wrap: word-wrap;
@@ -1499,6 +1505,7 @@ export component MainWindow inherits Window {
     in property <string> federation-status: "Not set";
     in property <[NotarizationItem]> notarizations;
     in property <string> reputation: "0";
+    in property <string> reputation-pending;
 
     // ---- wallet ----
     in property <bool> wallet-connected: false;
@@ -1689,6 +1696,7 @@ export component MainWindow inherits Window {
                 federation-status: root.federation-status;
                 notarizations: root.notarizations;
                 reputation: root.reputation;
+                reputation-pending: root.reputation-pending;
                 back => { root.back-home(); }
                 add-relay(u) => { root.add-relay(u); }
                 remove-relay(u) => { root.remove-relay(u); }

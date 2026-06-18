@@ -143,6 +143,9 @@ struct ViewState {
     notarizations: Vec<Notarization>,
     /// Our total confirmed-burn reputation (sats), shown above the list.
     reputation_sats: u64,
+    /// Burnt sats still in the mempool (unconfirmed) — shown alongside the
+    /// confirmed total so a fresh burn is visible before it confirms.
+    pending_sats: u64,
 
     /// Driver's current sort (the snapshot doesn't carry it; we mirror it from
     /// the SetSort we send so the toggle highlights correctly).
@@ -174,6 +177,7 @@ impl Default for ViewState {
             federation_invite: String::new(),
             notarizations: Vec::new(),
             reputation_sats: 0,
+            pending_sats: 0,
             sort: SortKey::PickupDistance,
             toast: None,
             map: MapState::default(),
@@ -508,10 +512,12 @@ impl Controller {
             UiEvent::Notarizations {
                 items,
                 reputation_sats,
+                pending_sats,
             } => {
                 let mut v = self.view.lock().unwrap();
                 v.notarizations = items;
                 v.reputation_sats = reputation_sats;
+                v.pending_sats = pending_sats;
             }
         }
         self.refresh_map();
@@ -710,6 +716,13 @@ impl Controller {
         )));
         ui.set_notarizations(notarizations_model(&view.notarizations));
         ui.set_reputation(view.reputation_sats.to_string().into());
+        // A non-empty string here triggers a "+N sat pending" note in Settings;
+        // empty means nothing is sitting in the mempool.
+        ui.set_reputation_pending(if view.pending_sats > 0 {
+            view.pending_sats.to_string().into()
+        } else {
+            slint::SharedString::new()
+        });
 
         // Copy the map view params out so the rest of render() can compute pin
         // offsets without holding a borrow of `view.map` across the UI setters.

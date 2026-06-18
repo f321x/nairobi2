@@ -5,6 +5,8 @@ A **permissionless, fully Nostr-native ridesharing app** for Android, in **Rust 
 No company, no server, no accounts, no platform fee — just riders and drivers meeting over the
 open [Nostr](https://nostr.com) network and paying **cash, peer-to-peer**, in person.
 
+<p align="center"><img src="docs/screenshots/home.png" alt="nairobi2 home screen" width="260"></p>
+
 ## How it works
 
 1. A **passenger** posts a ride request (pickup → dropoff) with a **starting** rate per km and a
@@ -32,8 +34,10 @@ Uber-like but **icon-first and numeral-based**, so it's usable by people who can
 - **App + Android shell + build pipeline — building.** `./build.sh` compiles the Slint UI,
   cross-compiles for `aarch64-linux-android` (Skia + android-activity + nostr-sdk), and packages a
   valid, signed **18 MB `dist/nairobi-debug.apk`** (`io.nairobi.app`, minSdk 26). Following the
-  proven [ntrack](https://github.com/f321x/ntrack) structure. *On-device runtime behaviour
-  (UI rendering, relay connectivity, the live ride flow) has not yet been exercised on hardware.*
+  proven [ntrack](https://github.com/f321x/ntrack) structure. The desktop build also runs (under a
+  virtual display): the Home screen renders (above) and the app connects to live relays
+  (`nos.lol`, `relay.damus.io`, `relay.primal.net`). *Full on-hardware behaviour and the live
+  end-to-end ride flow remain to be exercised on a device.*
 
 This is a **v1 / proof of concept**. Out of scope for now (by design): sybil resistance, ratings
 and reputation, a pre-request "drivers nearby" map, and key backup. See the design spec.

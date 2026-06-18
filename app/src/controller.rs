@@ -1071,6 +1071,9 @@ impl Controller {
                     .open_url(&format!("https://mempool.space/tx/{txid}"));
             }
         });
+        hook!(on_publish_bond, |ctrl, amount: slint::SharedString| {
+            ctrl.publish_bond(&amount);
+        });
 
         // ---- wallet ----
         hook!(on_open_wallet, |ctrl| {
@@ -1280,6 +1283,35 @@ impl Controller {
             Err(e) => self.toast(&format!("Could not save federation: {e}")),
         }
         self.render_now();
+    }
+
+    /// Manually burn `amount` sat to bond this identity and build an initial
+    /// reputation (a demonstration of the proof-of-burn scheme). The amount is
+    /// persisted as the configured `bond_sats` so it survives a restart, then
+    /// the engine publishes the identity-bond event and notarizes the burn.
+    fn publish_bond(self: &Arc<Self>, amount: &str) {
+        let sats = match parse_sats(amount) {
+            Some(s) => s,
+            None => {
+                self.toast("Enter an amount in sat to burn");
+                return;
+            }
+        };
+        // A real burn pays the notary's Lightning invoice from the wallet; the
+        // in-memory fallback can't settle it, so guide the user instead of
+        // silently failing.
+        if !self.view.lock().unwrap().wallet.connected {
+            self.toast("Add a Fedimint federation in Settings to fund the burn");
+            return;
+        }
+        // Remember the chosen bond amount across launches.
+        let mut config = self.store.load().unwrap_or_default();
+        config.bond_sats = sats;
+        config.relays = self.view.lock().unwrap().relays.clone();
+        if let Err(e) = self.store.save(&config) {
+            log::warn!("could not persist bond amount: {e}");
+        }
+        let _ = self.cmd_tx.send(EngineCmd::PublishBond { amount_sats: sats });
     }
 
     pub fn shutdown(&self) {

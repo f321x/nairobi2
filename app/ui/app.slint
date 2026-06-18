@@ -971,6 +971,7 @@ component SettingsScreen inherits Rectangle {
     callback remove-relay(string);
     callback set-federation(string);
     callback open-notarization(string);
+    callback publish-bond(string);
 
     VerticalLayout {
         BackBar { title: "Settings"; back => { root.back(); } }
@@ -1090,6 +1091,29 @@ component SettingsScreen inherits Rectangle {
                             color: Theme.muted;
                             font-size: 11px;
                             wrap: word-wrap;
+                        }
+                    }
+                }
+                Card {
+                    VerticalLayout {
+                        padding: Theme.pad;
+                        spacing: 10px;
+                        Text {
+                            text: "Bond your identity by burning a chosen amount of Bitcoin now. This gives you an initial reputation before your first ride — useful to demonstrate the scheme. Needs a funded Fedimint wallet.";
+                            color: Theme.muted;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                        bond-input := LineEdit {
+                            placeholder-text: "amount in sat (e.g. 1000)";
+                            input-type: number;
+                        }
+                        SmallButton {
+                            text: "🔥 Burn to bond identity";
+                            clicked => {
+                                root.publish-bond(bond-input.text);
+                                bond-input.text = "";
+                            }
                         }
                     }
                 }
@@ -1487,6 +1511,7 @@ export component MainWindow inherits Window {
     callback remove-relay(string);
     callback set-federation(string);
     callback open-notarization(string);
+    callback publish-bond(string);
 
     // wallet
     callback open-wallet();
@@ -1629,6 +1654,7 @@ export component MainWindow inherits Window {
                 remove-relay(u) => { root.remove-relay(u); }
                 set-federation(i) => { root.set-federation(i); }
                 open-notarization(t) => { root.open-notarization(t); }
+                publish-bond(a) => { root.publish-bond(a); }
             }
 
             if root.screen == 7 : WalletScreen {

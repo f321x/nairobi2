@@ -17,6 +17,8 @@ use nostr_sdk::prelude::*;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::auction::{self, Auction};
+use crate::burn::reputation::{BurnRecord, ReputationLedger};
+use crate::burn::service::{BurnOutcome, BurnPurpose, BurnService, NoBurnService, NotarizeReq};
 use crate::geo::LatLng;
 use crate::keys;
 use crate::matching::{self, Acceptance};
@@ -76,6 +78,17 @@ pub enum EngineCmd {
     // shared, post-match
     SendDm(String),
     CompleteTrip,
+    // proof-of-burn anti-sybil
+    /// Publish an identity bond and burn `amount_sats` against it (L1).
+    PublishBond {
+        amount_sats: u64,
+    },
+    /// Set the minimum confirmed-burn reputation (sats) a counterparty must have
+    /// to appear in the offer list. `0` disables gating (permissionless default).
+    SetReputationThreshold(u64),
+    /// A result from the [`BurnService`] (proof produced, or a third party's
+    /// upvote verified). Forwarded by the controller like a [`PoolEvent`].
+    Burn(BurnOutcome),
 }
 
 /// One chat message in a matched ride.
@@ -175,6 +188,9 @@ struct PassengerState {
     /// to the deterministic winner once `now` reaches this deadline.
     resolve_at: Option<u64>,
     driver: Option<PublicKey>,
+    /// The winning acceptance, kept so we can build a ride-completion attestation
+    /// (the per-ride burn target) on completion.
+    winner_acc: Option<Acceptance>,
     driver_location: Option<LatLng>,
     last_beacon: u64,
     messages: Vec<ChatMessage>,
@@ -190,6 +206,7 @@ struct DriverState {
     sort: SortKey,
     offers: BTreeMap<String, OfferEntry>, // key: passenger pubkey hex
     pending_take: Option<String>,         // passenger hex we accepted, awaiting confirm
+    my_acceptance_id: Option<String>,     // our acceptance event id (completion ref)
     trip: Option<TripState>,
     last_beacon: u64,
     messages: Vec<ChatMessage>,
@@ -216,11 +233,50 @@ pub struct Engine<P: Pool> {
     now: u64,
     location: Option<LatLng>,
     role: Role,
+    /// Proof-of-burn service (no-op [`NoBurnService`] unless built with
+    /// [`Engine::with_burn`]).
+    burn: Arc<dyn BurnService>,
+    /// `true` only when a real burn backend is wired in — guards the bond /
+    /// per-ride burn side effects so the default engine behaves exactly as before.
+    burn_enabled: bool,
+    /// Locally-computed, verified reputation per pubkey (hex).
+    reputation: ReputationLedger,
+    /// Minimum confirmed-burn sats to show a counterparty (`0` = gating off).
+    rep_threshold: u64,
+    /// Sats to burn on each completed ride (`0` = no per-ride burn).
+    ride_burn_sats: u64,
 }
 
 impl<P: Pool> Engine<P> {
-    /// Create an idle engine.
+    /// Create an idle engine with proof-of-burn disabled (the default path).
     pub fn new(keys: Keys, pool: Arc<P>, ui_tx: UnboundedSender<UiEvent>) -> Self {
+        Self::build(keys, pool, ui_tx, Arc::new(NoBurnService), false, 0, 0)
+    }
+
+    /// Create an idle engine wired to a real [`BurnService`]. `rep_threshold`
+    /// gates the offer list by confirmed reputation (sats); `ride_burn_sats` is
+    /// the per-completed-ride burn (`0` to disable either).
+    pub fn with_burn(
+        keys: Keys,
+        pool: Arc<P>,
+        ui_tx: UnboundedSender<UiEvent>,
+        burn: Arc<dyn BurnService>,
+        rep_threshold: u64,
+        ride_burn_sats: u64,
+    ) -> Self {
+        Self::build(keys, pool, ui_tx, burn, true, rep_threshold, ride_burn_sats)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        keys: Keys,
+        pool: Arc<P>,
+        ui_tx: UnboundedSender<UiEvent>,
+        burn: Arc<dyn BurnService>,
+        burn_enabled: bool,
+        rep_threshold: u64,
+        ride_burn_sats: u64,
+    ) -> Self {
         let me = keys.public_key();
         Self {
             keys,
@@ -230,7 +286,18 @@ impl<P: Pool> Engine<P> {
             now: 0,
             location: None,
             role: Role::Idle,
+            burn,
+            burn_enabled,
+            reputation: ReputationLedger::new(),
+            rep_threshold,
+            ride_burn_sats,
         }
+    }
+
+    /// The locally-known confirmed-burn reputation (sats) for `pubkey_hex` — for
+    /// the UI to show one's own or a counterparty's standing.
+    pub fn reputation_sats(&self, pubkey_hex: &str) -> u64 {
+        self.reputation.score_sats(pubkey_hex)
     }
 
     /// Run the engine loop until the command channel closes or `Shutdown`.
@@ -272,6 +339,12 @@ impl<P: Pool> Engine<P> {
             EngineCmd::TakeRide { request_id } => self.take_ride(&request_id),
             EngineCmd::SendDm(text) => self.send_dm(text),
             EngineCmd::CompleteTrip => self.complete_trip(),
+            EngineCmd::PublishBond { amount_sats } => self.publish_bond(amount_sats),
+            EngineCmd::SetReputationThreshold(t) => {
+                self.rep_threshold = t;
+                self.emit_current();
+            }
+            EngineCmd::Burn(outcome) => self.on_burn(outcome),
         }
     }
 
@@ -314,6 +387,7 @@ impl<P: Pool> Engine<P> {
             acceptances: Vec::new(),
             resolve_at: None,
             driver: None,
+            winner_acc: None,
             driver_location: None,
             last_beacon: 0,
             messages: Vec::new(),
@@ -387,12 +461,15 @@ impl<P: Pool> Engine<P> {
         let mut matched: Option<RideRequest> = None;
         if let Role::Passenger(p) = &mut self.role {
             let cands = matching::candidates(&p.acceptances, p.t0, &p.published_ids);
-            match matching::winner(&cands)
+            let winning = matching::winner(&cands).cloned();
+            match winning
+                .as_ref()
                 .and_then(|w| PublicKey::parse(&w.driver).ok().map(|pk| (pk, w.driver.clone())))
             {
                 Some((driver_pk, driver_hex)) => {
                     p.phase = PassengerPhase::Matched;
                     p.driver = Some(driver_pk);
+                    p.winner_acc = winning.clone();
                     p.request.status = RideStatus::Matched;
                     p.request.winner = Some(driver_hex);
                     p.last_beacon = now;
@@ -420,6 +497,7 @@ impl<P: Pool> Engine<P> {
             sort: SortKey::PickupDistance,
             offers: BTreeMap::new(),
             pending_take: None,
+            my_acceptance_id: None,
             trip: None,
             last_beacon: 0,
             messages: Vec::new(),
@@ -442,6 +520,16 @@ impl<P: Pool> Engine<P> {
         }
         // While in a trip, also receive the passenger's beacons.
         filters.push(protocol::beacons_filter(&self.me, SUBSCRIBE_WINDOW_SECS));
+        // Proof-of-burn: discover reputation proofs self-published by the
+        // passengers currently offering rides (to gate the list).
+        if self.burn_enabled {
+            if let Role::Driver(d) = &self.role {
+                let authors: Vec<PublicKey> = d.offers.values().map(|e| e.event.pubkey).collect();
+                if !authors.is_empty() {
+                    filters.push(protocol::upvoting_filter(&authors, SUBSCRIBE_WINDOW_SECS));
+                }
+            }
+        }
         self.pool.subscribe(filters);
     }
 
@@ -459,6 +547,7 @@ impl<P: Pool> Engine<P> {
         let passenger_hex = event.pubkey.to_hex();
         let mut won: Option<Offer> = None;
         let mut lost = false;
+        let mut new_offer = false;
 
         if let Role::Driver(d) = &mut self.role {
             // A matched/cancelled/expired request leaves the open list…
@@ -486,6 +575,7 @@ impl<P: Pool> Engine<P> {
                 }
                 d.offers.remove(&passenger_hex);
             } else if still_open {
+                new_offer = !d.offers.contains_key(&passenger_hex);
                 d.offers.insert(
                     passenger_hex.clone(),
                     OfferEntry {
@@ -501,6 +591,11 @@ impl<P: Pool> Engine<P> {
         if won.is_some() {
             self.resubscribe_driver();
             self.emit(UiEvent::NeedLocation(true));
+        }
+        // A newly-seen passenger: (re)subscribe to pick up their reputation
+        // proofs so we can gate the offer.
+        if new_offer && self.burn_enabled {
+            self.resubscribe_driver();
         }
         if lost {
             self.emit(UiEvent::Toast("ride taken by another driver".into()));
@@ -520,6 +615,7 @@ impl<P: Pool> Engine<P> {
                 match protocol::build_acceptance(&keys, &entry.event) {
                     Ok(ev) => {
                         d.pending_take = Some(passenger_hex.clone());
+                        d.my_acceptance_id = Some(ev.id.to_hex());
                         d.phase = DriverPhase::AwaitingConfirm;
                         accept_event = Some(ev);
                     }
@@ -596,6 +692,8 @@ impl<P: Pool> Engine<P> {
     }
 
     fn complete_trip(&mut self) {
+        // Attest + burn for the completed ride before tearing down state (L2).
+        self.maybe_burn_completion();
         match &mut self.role {
             Role::Passenger(p) => p.phase = PassengerPhase::Completed,
             Role::Driver(d) => {
@@ -613,6 +711,148 @@ impl<P: Pool> Engine<P> {
         self.pool.subscribe(vec![]);
         self.emit(UiEvent::NeedLocation(false));
         self.emit(UiEvent::Idle);
+    }
+
+    // ---- Proof-of-burn (anti-sybil) ---------------------------------------
+
+    /// L1 — publish an immutable identity bond and burn `amount_sats` against it.
+    fn publish_bond(&mut self, amount_sats: u64) {
+        if !self.burn_enabled || amount_sats == 0 {
+            return;
+        }
+        match protocol::build_identity_bond(&self.keys) {
+            Ok(event) => {
+                let event_id = protocol::event_id_bytes(&event);
+                self.pool.publish(event);
+                self.burn.notarize(NotarizeReq {
+                    event_id,
+                    value_sats: amount_sats,
+                    purpose: BurnPurpose::Bond,
+                    sign: true,
+                    counterparty: None,
+                });
+                self.emit(UiEvent::Toast("bonding identity…".into()));
+            }
+            Err(e) => log::warn!("build identity bond: {e}"),
+        }
+    }
+
+    /// L2 — on a completed ride, attest it and burn `ride_burn_sats` against the
+    /// attestation, so both parties accrue reputation over time.
+    fn maybe_burn_completion(&mut self) {
+        if !self.burn_enabled || self.ride_burn_sats == 0 {
+            return;
+        }
+        // Gather (request, acceptance, counterparty, fare, currency) from
+        // whichever role we're in; skip if we lack the references.
+        let completion = match &self.role {
+            Role::Passenger(p) => match (p.driver, &p.winner_acc) {
+                (Some(driver), Some(acc)) => Some((
+                    acc.request_id.clone(),
+                    acc.event_id.clone(),
+                    driver,
+                    p.request.fare_estimate,
+                    p.request.currency.clone(),
+                )),
+                _ => None,
+            },
+            Role::Driver(d) => match (&d.trip, &d.my_acceptance_id) {
+                (Some(t), Some(acc_id)) => Some((
+                    t.offer.request_id.clone(),
+                    acc_id.clone(),
+                    t.passenger,
+                    t.offer.earnings,
+                    t.offer.currency.clone(),
+                )),
+                _ => None,
+            },
+            Role::Idle => None,
+        };
+        let Some((request_id, acceptance_id, counterparty, fare, currency)) = completion else {
+            return;
+        };
+        match protocol::build_ride_completion(
+            &self.keys,
+            &request_id,
+            &acceptance_id,
+            &counterparty,
+            fare,
+            &currency,
+        ) {
+            Ok(event) => {
+                let event_id = protocol::event_id_bytes(&event);
+                self.pool.publish(event);
+                self.burn.notarize(NotarizeReq {
+                    event_id,
+                    value_sats: self.ride_burn_sats,
+                    purpose: BurnPurpose::Ride,
+                    sign: true,
+                    counterparty: Some(counterparty.to_hex()),
+                });
+            }
+            Err(e) => log::warn!("build ride completion: {e}"),
+        }
+    }
+
+    /// Handle a result pushed back by the [`BurnService`].
+    fn on_burn(&mut self, outcome: BurnOutcome) {
+        match outcome {
+            BurnOutcome::Proven {
+                purpose,
+                proof,
+                counterparty,
+            } => {
+                // Publish the proof (kind 30021) for others to discover, and
+                // credit ourselves locally.
+                match protocol::build_upvoting_event(&self.keys, &proof, Some(&self.me)) {
+                    Ok(ev) => self.pool.publish(ev),
+                    Err(e) => log::warn!("build upvoting event: {e}"),
+                }
+                self.reputation.record(
+                    crate::burn::to_hex(&proof.leaf_hash()),
+                    BurnRecord {
+                        pubkey: self.me.to_hex(),
+                        value_msat: proof.leaf_value_msat,
+                        confirmed: proof.is_confirmed(),
+                        counterparty,
+                    },
+                );
+                let what = match purpose {
+                    BurnPurpose::Bond => "bond",
+                    BurnPurpose::Ride => "ride",
+                    BurnPurpose::Boost => "boost",
+                };
+                self.emit(UiEvent::Toast(format!(
+                    "{what} reputation +{} sat",
+                    proof.leaf_value_msat / 1000
+                )));
+                self.emit_current();
+            }
+            BurnOutcome::Failed { reason, .. } => {
+                self.emit(UiEvent::Toast(format!("burn failed: {reason}")));
+            }
+            BurnOutcome::Credited {
+                pubkey,
+                leaf_hash,
+                value_msat,
+                confirmed,
+                counterparty,
+            } => {
+                let changed = self.reputation.record(
+                    leaf_hash,
+                    BurnRecord {
+                        pubkey,
+                        value_msat,
+                        confirmed,
+                        counterparty,
+                    },
+                );
+                if changed {
+                    self.emit_current(); // gating may now admit/hide an offer
+                }
+            }
+            BurnOutcome::Rejected { reason } => log::debug!("upvote rejected: {reason}"),
+        }
     }
 
     // ---- Tick / location / pool dispatch ----------------------------------
@@ -752,6 +992,12 @@ impl<P: Pool> Engine<P> {
             if let Ok(beacon) = protocol::parse_beacon(&self.keys, &event) {
                 self.on_beacon(sender, beacon);
             }
+        } else if kind == protocol::KIND_UPVOTING_EVENT && self.burn_enabled {
+            // A counterparty's reputation proof — verify it on-chain (async),
+            // crediting them when the service reports back.
+            if let Ok(proof) = protocol::parse_upvoting_event(&event) {
+                self.burn.verify_incoming(proof);
+            }
         }
     }
 
@@ -790,6 +1036,12 @@ impl<P: Pool> Engine<P> {
             let mut offers: Vec<Offer> = d
                 .offers
                 .values()
+                // L3 — hide passengers below the reputation bar (threshold 0 =
+                // off, the permissionless default).
+                .filter(|e| {
+                    self.reputation
+                        .meets(&e.event.pubkey.to_hex(), self.rep_threshold)
+                })
                 .map(|e| build_offer(&e.event, &e.req, self.location, &e.event.pubkey.to_hex()))
                 .collect();
             sort_offers(&mut offers, d.sort);
@@ -845,6 +1097,7 @@ fn sort_offers(offers: &mut [Offer], key: SortKey) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::burn::service::{BurnOutcome, BurnPurpose, MockBurnService};
     use crate::pool::MockPool;
     use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 
@@ -860,6 +1113,36 @@ mod tests {
         let (tx, ui) = unbounded_channel();
         let engine = Engine::new(keys.clone(), pool.clone(), tx);
         (Harness { engine, pool, ui }, keys)
+    }
+
+    /// A harness wired to a [`MockBurnService`], returning the service (for
+    /// request assertions) and its outcome receiver (to pump results back in).
+    fn burn_harness(
+        rep_threshold: u64,
+        ride_burn_sats: u64,
+    ) -> (Harness, Arc<MockBurnService>, UnboundedReceiver<BurnOutcome>, Keys) {
+        let keys = keys::generate();
+        let pool = Arc::new(MockPool::new());
+        let (tx, ui) = unbounded_channel();
+        let (btx, brx) = unbounded_channel();
+        let burn = Arc::new(MockBurnService::new(btx));
+        let engine = Engine::with_burn(
+            keys.clone(),
+            pool.clone(),
+            tx,
+            burn.clone(),
+            rep_threshold,
+            ride_burn_sats,
+        );
+        (Harness { engine, pool, ui }, burn, brx, keys)
+    }
+
+    /// Feed every queued burn outcome back into the engine (as the controller
+    /// would).
+    fn pump_burn(h: &mut Harness, brx: &mut UnboundedReceiver<BurnOutcome>) {
+        while let Ok(o) = brx.try_recv() {
+            h.engine.handle(EngineCmd::Burn(o));
+        }
     }
 
     impl Harness {
@@ -1214,5 +1497,143 @@ mod tests {
         assert_eq!(offers[0].request_id, "a"); // higher rate first
         sort_offers(&mut offers, SortKey::TripDistance);
         assert_eq!(offers[0].request_id, "b"); // longer trip first
+    }
+
+    // ---- proof-of-burn integration ----------------------------------------
+
+    #[test]
+    fn publish_bond_notarizes_then_publishes_proof_and_credits_self() {
+        let (mut h, burn, mut brx, keys) = burn_harness(0, 0);
+        h.engine.handle(EngineCmd::Tick { now: 1000 });
+        h.engine.handle(EngineCmd::PublishBond { amount_sats: 500 });
+
+        // An immutable identity-bond event is published…
+        let bond = h.pool.last_published().unwrap();
+        assert_eq!(bond.kind, Kind::Custom(protocol::KIND_IDENTITY_BOND));
+        // …and the service is asked to burn against it.
+        let reqs = burn.requests();
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(reqs[0].purpose, BurnPurpose::Bond);
+        assert_eq!(reqs[0].value_sats, 500);
+        assert!(reqs[0].sign);
+
+        // The mock returns a proof; feed it back.
+        pump_burn(&mut h, &mut brx);
+
+        // We publish the proof as a kind-30021 upvoting event…
+        let last = h.pool.last_published().unwrap();
+        assert_eq!(last.kind, Kind::Custom(protocol::KIND_UPVOTING_EVENT));
+        // …and credit ourselves locally.
+        assert_eq!(h.engine.reputation_sats(&keys.public_key().to_hex()), 500);
+    }
+
+    #[test]
+    fn reputation_gate_hides_then_shows_a_passenger() {
+        let (mut h, _burn, _brx, _k) = burn_harness(100, 0);
+        h.engine.handle(EngineCmd::Tick { now: 1000 });
+        h.engine.handle(EngineCmd::Location(LatLng::new(-1.30, 36.82)));
+        h.engine.handle(EngineCmd::GoOnline);
+
+        let passenger = keys::generate();
+        let req = RideRequest {
+            pickup: LatLng::new(-1.2864, 36.8172),
+            dropoff: LatLng::new(-1.3192, 36.9278),
+            distance_km: 10.0,
+            currency: "KES".into(),
+            start_rate: 30,
+            max_rate: 100,
+            current_rate: 30,
+            fare_estimate: 300,
+            status: RideStatus::Open,
+            winner: None,
+        };
+        let event = protocol::build_ride_request(&passenger, &req, 90).unwrap();
+        h.engine
+            .handle(EngineCmd::Pool(PoolEvent::Incoming(Box::new(event))));
+
+        // Below the 100-sat bar → hidden.
+        assert!(h.last_driver().unwrap().offers.is_empty());
+
+        // A verified upvote credits the passenger 200 sat (confirmed) → shown.
+        h.engine.handle(EngineCmd::Burn(BurnOutcome::Credited {
+            pubkey: passenger.public_key().to_hex(),
+            leaf_hash: "leaf-a".into(),
+            value_msat: 200_000,
+            confirmed: true,
+            counterparty: None,
+        }));
+        assert_eq!(h.last_driver().unwrap().offers.len(), 1);
+    }
+
+    #[test]
+    fn unconfirmed_credit_does_not_pass_the_gate() {
+        let (mut h, _burn, _brx, _k) = burn_harness(100, 0);
+        h.engine.handle(EngineCmd::Tick { now: 1000 });
+        h.engine.handle(EngineCmd::Location(LatLng::new(-1.30, 36.82)));
+        h.engine.handle(EngineCmd::GoOnline);
+
+        let passenger = keys::generate();
+        let mut req = sample_open_request();
+        req.fare_estimate = 300;
+        let event = protocol::build_ride_request(&passenger, &req, 90).unwrap();
+        h.engine
+            .handle(EngineCmd::Pool(PoolEvent::Incoming(Box::new(event))));
+
+        // A mempool-only (unconfirmed) burn does not count toward the gate.
+        h.engine.handle(EngineCmd::Burn(BurnOutcome::Credited {
+            pubkey: passenger.public_key().to_hex(),
+            leaf_hash: "leaf-b".into(),
+            value_msat: 500_000,
+            confirmed: false,
+            counterparty: None,
+        }));
+        assert!(h.last_driver().unwrap().offers.is_empty());
+    }
+
+    #[test]
+    fn completing_a_ride_attests_and_burns_for_the_passenger() {
+        let (mut h, burn, _brx, _k) = burn_harness(0, 10);
+        h.engine.handle(EngineCmd::Tick { now: 1000 });
+        h.engine.handle(request_cmd());
+        let request_event = h.pool.last_published().unwrap();
+
+        let driver = keys::generate();
+        let acc = protocol::build_acceptance(&driver, &request_event).unwrap();
+        h.engine
+            .handle(EngineCmd::Pool(PoolEvent::Incoming(Box::new(acc))));
+        h.engine
+            .handle(EngineCmd::Tick { now: 1000 + MATCH_WINDOW_SECS + 1 });
+
+        h.engine.handle(EngineCmd::CompleteTrip);
+
+        // A ride-completion attestation was published…
+        assert!(h
+            .pool
+            .published()
+            .iter()
+            .any(|e| e.kind == Kind::Custom(protocol::KIND_RIDE_COMPLETION)));
+        // …and a per-ride burn requested, naming the driver as counterparty.
+        let ride = burn
+            .requests()
+            .into_iter()
+            .find(|r| r.purpose == BurnPurpose::Ride)
+            .expect("a ride burn");
+        assert_eq!(ride.value_sats, 10);
+        assert_eq!(ride.counterparty, Some(driver.public_key().to_hex()));
+    }
+
+    fn sample_open_request() -> RideRequest {
+        RideRequest {
+            pickup: LatLng::new(-1.2864, 36.8172),
+            dropoff: LatLng::new(-1.3192, 36.9278),
+            distance_km: 10.0,
+            currency: "KES".into(),
+            start_rate: 30,
+            max_rate: 100,
+            current_rate: 30,
+            fare_estimate: 300,
+            status: RideStatus::Open,
+            winner: None,
+        }
     }
 }

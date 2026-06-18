@@ -22,6 +22,17 @@ pub const KIND_RIDE_REQUEST: u16 = 11311;
 pub const KIND_RIDE_ACCEPTANCE: u16 = 1313;
 /// Ephemeral: an encrypted live-location beacon (range 20000–29999).
 pub const KIND_LOCATION_BEACON: u16 = 21313;
+/// Regular/stored, **immutable**: the proof-of-burn identity bond. A stable
+/// event id is the durable target the one-time bond burn references (a
+/// replaceable event's id changes per version, orphaning the proof).
+pub const KIND_IDENTITY_BOND: u16 = 13131;
+/// Regular/stored, **immutable**: a ride-completion attestation — the target of
+/// the per-ride (~1 %) burn. References the request, the acceptance, and the
+/// counterparty (for reputation + diversity).
+pub const KIND_RIDE_COMPLETION: u16 = 1314;
+/// Addressable: the proof-of-burn "upvoting" event carrying a verifiable proof
+/// (`docs/proof-of-burn-api.md` §7). Kept compatible with the notary's format.
+pub const KIND_UPVOTING_EVENT: u16 = 30021;
 
 /// Lifecycle status carried in the ride-request payload.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -141,6 +152,118 @@ pub fn parse_beacon(keys: &Keys, event: &Event) -> Result<Beacon> {
     serde_json::from_str(&plain).map_err(Into::into)
 }
 
+// ---- Proof-of-burn events -------------------------------------------------
+
+/// The raw 32 bytes of an event id (for notarizing it / leaf hashing).
+pub fn event_id_bytes(event: &Event) -> [u8; 32] {
+    event.id.to_bytes()
+}
+
+/// Build + sign an **identity bond** event — the stable, immutable target of a
+/// one-time bond burn. Its event id (returned via [`Event::id`]) is what the
+/// caller then notarizes. A `t` tag marks it for discovery.
+pub fn build_identity_bond(keys: &Keys) -> Result<Event> {
+    EventBuilder::new(Kind::Custom(KIND_IDENTITY_BOND), "")
+        .tags([Tag::hashtag("nairobi-ride-bond")])
+        .sign_with_keys(keys)
+        .map_err(|e| Error::Nostr(format!("sign identity bond: {e}")))
+}
+
+/// Build + sign a **ride-completion attestation** — the immutable target of a
+/// per-ride burn. References the request + acceptance events and p-tags the
+/// counterparty so consumers can weight reputation by counterparty diversity.
+pub fn build_ride_completion(
+    keys: &Keys,
+    request_id_hex: &str,
+    acceptance_id_hex: &str,
+    counterparty: &PublicKey,
+    fare: u32,
+    currency: &str,
+) -> Result<Event> {
+    let request_id =
+        EventId::parse(request_id_hex).map_err(|e| Error::Nostr(format!("request id: {e}")))?;
+    let acceptance_id = EventId::parse(acceptance_id_hex)
+        .map_err(|e| Error::Nostr(format!("acceptance id: {e}")))?;
+    EventBuilder::new(Kind::Custom(KIND_RIDE_COMPLETION), "")
+        .tags([
+            Tag::event(request_id),
+            Tag::event(acceptance_id),
+            Tag::public_key(*counterparty),
+            Tag::custom(TagKind::custom("fare"), [fare.to_string(), currency.to_string()]),
+        ])
+        .sign_with_keys(keys)
+        .map_err(|e| Error::Nostr(format!("sign ride completion: {e}")))
+}
+
+/// Build + sign a kind-30021 **upvoting event** carrying `proof`
+/// (`docs/proof-of-burn-api.md` §7.1). `upvoted_author`, if given, is p-tagged.
+pub fn build_upvoting_event(
+    keys: &Keys,
+    proof: &crate::burn::proof::BurnProof,
+    upvoted_author: Option<&PublicKey>,
+) -> Result<Event> {
+    let n = proof.pack_n_tag();
+    let mut tags: Vec<Tag> = vec![
+        Tag::custom(TagKind::custom("e"), [crate::burn::to_hex(&proof.event_id)]),
+        Tag::identifier(crate::burn::to_hex(&proof.leaf_hash())),
+        Tag::custom(TagKind::custom("version"), [proof.version.to_string()]),
+        Tag::custom(TagKind::custom("n"), n),
+    ];
+    if let (Some(pk), Some(sig)) = (proof.upvoter_pubkey, proof.upvoter_signature) {
+        tags.push(Tag::custom(
+            TagKind::custom("u"),
+            [crate::burn::to_hex(&pk), crate::burn::to_hex(&sig)],
+        ));
+    }
+    if let Some(author) = upvoted_author {
+        tags.push(Tag::public_key(*author));
+    }
+    if let Some(chain) = &proof.chain {
+        tags.push(Tag::custom(TagKind::custom("chain"), [chain.clone()]));
+    }
+    EventBuilder::new(Kind::Custom(KIND_UPVOTING_EVENT), "")
+        .tags(tags)
+        .sign_with_keys(keys)
+        .map_err(|e| Error::Nostr(format!("sign upvoting event: {e}")))
+}
+
+/// Parse a kind-30021 upvoting event back into a [`crate::burn::proof::BurnProof`]
+/// (`docs/proof-of-burn-api.md` §7.2). The caller verifies it on-chain.
+pub fn parse_upvoting_event(event: &Event) -> Result<crate::burn::proof::BurnProof> {
+    require_kind(event, KIND_UPVOTING_EVENT, "upvoting event")?;
+    verify(event, "upvoting event")?;
+    let event_id_hex =
+        tag_value(event, "e").ok_or_else(|| Error::Nostr("upvote missing `e` tag".into()))?;
+    let version: u32 = tag_value(event, "version").and_then(|v| v.parse().ok()).unwrap_or(0);
+    let chain = tag_value(event, "chain").map(str::to_string);
+
+    let n = tag_slice(event, "n").ok_or_else(|| Error::Nostr("upvote missing `n` tag".into()))?;
+    if n.len() != 6 {
+        return Err(Error::Nostr(format!("upvote `n` has {} values, want 6", n.len())));
+    }
+    let block_height: u64 = n[1].parse().map_err(|_| Error::Nostr("bad block_height".into()))?;
+    let leaf_value: u64 = n[3].parse().map_err(|_| Error::Nostr("bad leaf_value".into()))?;
+    let merkle_index: u64 = n[4].parse().map_err(|_| Error::Nostr("bad merkle_index".into()))?;
+
+    let upvoter = tag_slice(event, "u").and_then(|u| match u {
+        [pk, sig, ..] => Some((pk.as_str(), sig.as_str())),
+        _ => None,
+    });
+
+    crate::burn::proof::proof_from_parts(
+        version,
+        chain,
+        event_id_hex,
+        &n[0],
+        block_height,
+        &n[2],
+        leaf_value,
+        merkle_index,
+        &n[5],
+        upvoter,
+    )
+}
+
 // ---- Filters --------------------------------------------------------------
 
 /// Subscription for nearby **open** ride requests at the given geohash prefixes
@@ -174,6 +297,15 @@ pub fn dm_filter(me: &PublicKey, since_secs_ago: u64) -> Filter {
     Filter::new()
         .kind(Kind::GiftWrap)
         .pubkey(*me)
+        .since(Timestamp::now() - since_secs_ago)
+}
+
+/// Subscription for proof-of-burn upvoting events (kind 30021) self-published by
+/// `authors` — how a client discovers a counterparty's reputation proofs.
+pub fn upvoting_filter(authors: &[PublicKey], since_secs_ago: u64) -> Filter {
+    Filter::new()
+        .kind(Kind::Custom(KIND_UPVOTING_EVENT))
+        .authors(authors.iter().copied())
         .since(Timestamp::now() - since_secs_ago)
 }
 
@@ -215,6 +347,15 @@ fn tag_value<'a>(event: &'a Event, name: &str) -> Option<&'a str> {
         (parts.first().map(String::as_str) == Some(name))
             .then(|| parts.get(1).map(String::as_str))
             .flatten()
+    })
+}
+
+/// The values after the tag name of the first tag named `name` (e.g. the six
+/// elements of an `n` proof tag).
+fn tag_slice<'a>(event: &'a Event, name: &str) -> Option<&'a [String]> {
+    event.tags.iter().find_map(|t| {
+        let parts = t.as_slice();
+        (parts.first().map(String::as_str) == Some(name)).then(|| &parts[1..])
     })
 }
 
@@ -349,5 +490,50 @@ mod tests {
         assert!(af.kinds.as_ref().unwrap().contains(&Kind::Custom(KIND_RIDE_ACCEPTANCE)));
         let bf = beacons_filter(&me, 600);
         assert!(bf.kinds.as_ref().unwrap().contains(&Kind::Custom(KIND_LOCATION_BEACON)));
+    }
+
+    #[test]
+    fn identity_bond_is_immutable_and_has_a_stable_id() {
+        let keys = generate();
+        let bond = build_identity_bond(&keys).unwrap();
+        assert_eq!(bond.kind, Kind::Custom(KIND_IDENTITY_BOND));
+        assert_eq!(event_id_bytes(&bond), bond.id.to_bytes());
+        // Verifies as a signed event.
+        assert!(bond.verify().is_ok());
+    }
+
+    #[test]
+    fn ride_completion_references_request_acceptance_and_counterparty() {
+        let me = generate();
+        let cp = generate();
+        let req = build_ride_request(&me, &sample_request(), 90).unwrap();
+        let acc = build_acceptance(&cp, &req).unwrap();
+        let comp =
+            build_ride_completion(&me, &req.id.to_hex(), &acc.id.to_hex(), &cp.public_key(), 370, "KES")
+                .unwrap();
+        assert_eq!(comp.kind, Kind::Custom(KIND_RIDE_COMPLETION));
+        assert_eq!(tag_value(&comp, "p").unwrap(), cp.public_key().to_hex());
+        let es = tag_values(&comp, "e");
+        assert!(es.contains(&req.id.to_hex()) && es.contains(&acc.id.to_hex()));
+    }
+
+    #[test]
+    fn upvoting_event_round_trips_a_signed_proof() {
+        let keys = generate();
+        let (mut proof, _root) = crate::burn::proof::testtree::mint_proof(
+            [0x27u8; 32],
+            42,
+            [0x42u8; 32],
+            Some([0xaau8; 32]),
+            &[([1u8; 32], 8000), ([2u8; 32], 1000)],
+            "ab".repeat(32).as_str(),
+            900_000,
+        );
+        proof.upvoter_signature = Some([7u8; 64]); // dummy; parse doesn't verify
+        let ev = build_upvoting_event(&keys, &proof, Some(&keys.public_key())).unwrap();
+        assert_eq!(ev.kind, Kind::Custom(KIND_UPVOTING_EVENT));
+        // The leaf hash is the `d` (addressable) identifier.
+        assert_eq!(tag_value(&ev, "d").unwrap(), crate::burn::to_hex(&proof.leaf_hash()));
+        assert_eq!(parse_upvoting_event(&ev).unwrap(), proof);
     }
 }

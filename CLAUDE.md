@@ -64,6 +64,13 @@ Three parts (mirrors ntrack):
     LNURL-pay + M-Pesa (`<phone>@bitcoin.co.ke`) cash-out logic. Fire-and-forget like `Pool`
     (`WalletEvent`s come back on a channel). The real Fedimint backend lives in the separate
     `nairobi-wallet-fedimint` crate; a future Nostr-Wallet-Connect backend is a third impl.
+  - `burn` — **proof-of-burn anti-sybil** (notary `notary.electrum.org` + client-side Electrum
+    verification, paid via `wallet`). Pure, host-tested core: `proof` (leaf/node hashing,
+    Merkle-sum root, kind-30021 packing), `tx` (minimal Bitcoin tx/script parse, txid, P2WSH +
+    `OP_RETURN`), `verify` (Part B binding), `reputation` (per-pubkey accrual). I/O behind the
+    `BurnService` trait (`MockBurnService` + real `NotaryBurnService`), mirroring `Pool`/`Wallet`.
+    See `docs/superpowers/specs/2026-06-18-proof-of-burn-antisybil-design.md` +
+    `docs/proof-of-burn-api.md`.
 - **`app/` (`nairobi-app`)** — Slint UI + `Controller` + `map` renderer + `Platform` glue + desktop
   `sim`. Builds as a `cdylib` (Android) and a desktop binary. **Cannot be host-compiled in the dev
   sandbox** (no fontconfig); it is validated by the `cargo-ndk` Docker build.
@@ -89,6 +96,9 @@ network. **Time is injected** via `Tick{now}` so auctions are deterministic in t
 | 1313  | regular     | Ride Acceptance (a driver's claim, stored)    |
 | 21313 | ephemeral   | Location beacon (NIP-44 encrypted)            |
 | 1059  | gift-wrap   | NIP-17 private DM (post-match chat)           |
+| 13131 | regular     | Identity bond (immutable proof-of-burn target)|
+| 1314  | regular     | Ride-completion attestation (per-ride burn)   |
+| 30021 | addressable | Proof-of-burn upvoting event (carries a proof)|
 
 Ride requests carry multiple `g` geohash tags (precision 4–7) + a NIP-40 `expiration` (~90 s,
 refreshed every 30 s). Clients also enforce expiry themselves (never trust relays to delete).
@@ -137,7 +147,14 @@ crate's `fedimint` feature (and the app's `fedimint` feature), **off by default*
 
 ## Status
 
-- `core/` — **complete, 95 tests passing, clippy clean**, offline (78 ride + 17 wallet/M-Pesa).
+- `core/` — **complete, 136 tests passing, clippy clean**, offline (78 ride + 17 wallet/M-Pesa +
+  41 proof-of-burn).
+- `burn` (proof-of-burn) — **core complete + host-tested** (hashing/Merkle/tx-parse/verify/
+  reputation, the `BurnService` seam, and the engine's bond → proof → reputation → gating
+  lifecycle against mocks). The app's `Controller` wires the real `NotaryBurnService` (notary +
+  Electrum + wallet); gating + per-ride burn are config-driven and **default off** (permissionless).
+  The live notary/Electrum/Lightning path is **not exercised here** (offline; like `SdkPool`). A
+  Settings UI action to trigger the identity bond is the remaining step.
 - `wallet-fedimint/` — the real Fedimint backend; **compiles** with
   `RUSTFLAGS="--cfg tokio_unstable" cargo check -p nairobi-wallet-fedimint --features fedimint`.
   On-device/Android cross-build not yet exercised (see the ring-only caveat above).
@@ -146,8 +163,8 @@ crate's `fedimint` feature (and the app's `fedimint` feature), **off by default*
   minSdk 26): `libnairobi_app.so` (Rust+Slint+Skia+nostr-sdk) + `libc++_shared.so` + the Java
   shell in `classes.dex`. Verified to **compile and package**; **on-device runtime is not yet
   exercised** (no device/emulator here, and the desktop build needs GL libs absent from the image).
-  See the spec for what's deferred (sybil resistance, ratings, pre-request driver map, boot-resume,
-  key backup).
+  See the spec for what's deferred (ratings, pre-request driver map, boot-resume, key backup).
+  **Sybil resistance is now addressed** by the `burn` proof-of-burn layer (above).
 
 Build notes: the first `./build.sh` builds the ~4.4 GB toolchain image (needs network); reuse it
 with `SKIP_IMAGE_BUILD=1`. A benign `llvm-strip` warning ("unable to strip libc++_shared.so /

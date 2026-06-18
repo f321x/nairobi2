@@ -14,6 +14,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use nairobi_core::burn::electrum::ElectrumServer;
+use nairobi_core::burn::notary::NotaryClient;
+use nairobi_core::burn::service::{BurnService, NotaryBurnService};
 use nairobi_core::config::{ConfigStore, DEFAULT_CURRENCY};
 use nairobi_core::engine::{
     DriverPhase, DriverSnapshot, Engine, EngineCmd, Offer, PassengerPhase, PassengerSnapshot,
@@ -248,8 +251,45 @@ impl Controller {
             })
         };
 
-        // Spawn the engine.
-        rt.spawn(Engine::new(keys, pool, ui_tx).run(cmd_rx));
+        // Build the modular wallet first (the proof-of-burn service pays notary
+        // invoices with it). Mock by default (deterministic, no funds); the real
+        // Fedimint backend is swapped in behind the `fedimint` feature. Its
+        // `WalletEvent`s are folded into the view by a forwarder spawned below.
+        let (wallet_tx, wallet_rx) = mpsc::unbounded_channel();
+        let wallet = build_wallet(wallet_tx, data_dir, config.federation_invite.clone(), &rt);
+
+        // Proof-of-burn anti-sybil service: the notary (paid over Lightning via
+        // the wallet) + client-side Electrum verification. Results flow back as
+        // `EngineCmd::Burn`. Gating + per-ride burn are config-driven and default
+        // to off, so this is inert until the user opts in (permissionless).
+        let (burn_tx, mut burn_rx) = mpsc::unbounded_channel();
+        let electrum: Vec<ElectrumServer> = config
+            .electrum_servers
+            .iter()
+            .map(|s| ElectrumServer::parse(s))
+            .collect();
+        let burn: Arc<dyn BurnService> = Arc::new(NotaryBurnService::new(
+            keys.clone(),
+            wallet.clone(),
+            NotaryClient::public(),
+            electrum,
+            rt.clone(),
+            burn_tx,
+            Amount::from_sats(50),
+        ));
+
+        // Spawn the engine, wired to proof-of-burn.
+        rt.spawn(
+            Engine::with_burn(
+                keys,
+                pool,
+                ui_tx,
+                burn,
+                config.reputation_threshold_sats,
+                config.ride_burn_sats,
+            )
+            .run(cmd_rx),
+        );
 
         // pool events → engine commands
         let cmd_tx2 = cmd_tx.clone();
@@ -261,11 +301,15 @@ impl Controller {
             }
         });
 
-        // Build the modular wallet. Mock by default (deterministic, no funds);
-        // the real Fedimint backend is swapped in behind the `fedimint` feature.
-        // Its `WalletEvent`s are folded into the view by a forwarder spawned below.
-        let (wallet_tx, wallet_rx) = mpsc::unbounded_channel();
-        let wallet = build_wallet(wallet_tx, data_dir, config.federation_invite.clone(), &rt);
+        // burn outcomes → engine commands
+        let cmd_tx3 = cmd_tx.clone();
+        rt.spawn(async move {
+            while let Some(ev) = burn_rx.recv().await {
+                if cmd_tx3.send(EngineCmd::Burn(ev)).is_err() {
+                    break;
+                }
+            }
+        });
 
         let view = ViewState {
             screen_i: Screen::Home as i32,

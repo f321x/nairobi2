@@ -24,6 +24,7 @@
 //! No module here ever touches a UI toolkit or an OS API directly.
 
 pub mod auction;
+pub mod burn;
 pub mod config;
 pub mod engine;
 pub mod error;

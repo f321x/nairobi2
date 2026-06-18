@@ -31,6 +31,11 @@ pub enum Error {
     /// resolution, or the underlying Fedimint/NWC backend).
     #[error("wallet error: {0}")]
     Wallet(String),
+
+    /// A proof-of-burn failure: notary API, Electrum verification, malformed
+    /// proof, or on-chain mismatch.
+    #[error("burn error: {0}")]
+    Burn(String),
 }
 
 /// Convenience alias used throughout the crate.

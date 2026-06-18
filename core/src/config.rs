@@ -26,6 +26,15 @@ pub const DEFAULT_RELAYS: &[&str] = &[
 /// next to this short code (numerals are recognizable to non-literate users).
 pub const DEFAULT_CURRENCY: &str = "KES";
 
+/// Default Electrum servers (`host:port`, TLS) used to verify proofs of burn.
+/// Cross-checked against each other; editable in Settings. Integrity rests on
+/// SPV, not on trusting any one of these.
+pub const DEFAULT_ELECTRUM_SERVERS: &[&str] = &[
+    "electrum.blockstream.info:50002",
+    "fulcrum.sethforprivacy.com:50002",
+    "electrum.emzy.de:50002",
+];
+
 /// Everything we persist between launches.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -39,6 +48,15 @@ pub struct Config {
     /// Fedimint federation invite code the wallet joins on first use. `None`
     /// until the user pastes one in Settings; the mock/desktop wallet ignores it.
     pub federation_invite: Option<String>,
+    /// Electrum servers (`host:port`) used to verify proofs of burn.
+    pub electrum_servers: Vec<String>,
+    /// Minimum confirmed-burn reputation (sats) a counterparty must have to be
+    /// shown. `0` disables gating — the permissionless default.
+    pub reputation_threshold_sats: u64,
+    /// Sats to burn for the one-time identity bond (`0` = no bond).
+    pub bond_sats: u64,
+    /// Sats to burn on each completed ride (`0` = no per-ride burn).
+    pub ride_burn_sats: u64,
 }
 
 impl Default for Config {
@@ -48,6 +66,10 @@ impl Default for Config {
             relays: DEFAULT_RELAYS.iter().map(|s| s.to_string()).collect(),
             currency: DEFAULT_CURRENCY.to_string(),
             federation_invite: None,
+            electrum_servers: DEFAULT_ELECTRUM_SERVERS.iter().map(|s| s.to_string()).collect(),
+            reputation_threshold_sats: 0,
+            bond_sats: 0,
+            ride_burn_sats: 0,
         }
     }
 }

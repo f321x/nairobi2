@@ -99,6 +99,54 @@ pub async fn https_get_str(host: &str, path: &str) -> Result<String> {
     String::from_utf8(bytes).map_err(|e| Error::Geo(format!("utf8 from {host}: {e}")))
 }
 
+/// Perform one HTTPS POST of a JSON `body` to `host`/`path` and return the
+/// response body as UTF-8 text. Same single-connection, `Connection: close`,
+/// bounded-read, de-chunking behaviour as [`https_get`] — used by the
+/// proof-of-burn notary client (full webpki cert validation, unlike the
+/// SPV-trust Electrum path).
+pub async fn https_post_json(host: &str, path: &str, body: &str) -> Result<String> {
+    let tls = tls_config();
+    let stream = TcpStream::connect((host, 443))
+        .await
+        .map_err(|e| Error::Geo(format!("connect {host}: {e}")))?;
+    let domain = ServerName::try_from(host.to_string())
+        .map_err(|e| Error::Geo(format!("bad host {host}: {e}")))?;
+    let mut tls_stream = TlsConnector::from(tls)
+        .connect(domain, stream)
+        .await
+        .map_err(|e| Error::Geo(format!("tls {host}: {e}")))?;
+
+    let request = format!(
+        "POST {path} HTTP/1.1\r\n\
+         Host: {host}\r\n\
+         User-Agent: {USER_AGENT}\r\n\
+         Accept: application/json\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {len}\r\n\
+         Connection: close\r\n\r\n{body}",
+        len = body.len()
+    );
+    tls_stream
+        .write_all(request.as_bytes())
+        .await
+        .map_err(|e| Error::Geo(format!("write {host}: {e}")))?;
+    tls_stream
+        .flush()
+        .await
+        .map_err(|e| Error::Geo(format!("flush {host}: {e}")))?;
+
+    let mut raw = Vec::new();
+    tls_stream
+        .take(MAX_BODY)
+        .read_to_end(&mut raw)
+        .await
+        .map_err(|e| Error::Geo(format!("read {host}: {e}")))?;
+
+    let body = parse_http_body(&raw)
+        .ok_or_else(|| Error::Geo(format!("bad HTTP response from {host}")))?;
+    String::from_utf8(body).map_err(|e| Error::Geo(format!("utf8 from {host}: {e}")))
+}
+
 /// Split an HTTP/1.1 response into status/headers/body, returning the body only
 /// on `200`, de-chunking when `Transfer-Encoding: chunked`.
 fn parse_http_body(raw: &[u8]) -> Option<Vec<u8>> {

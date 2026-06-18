@@ -111,6 +111,8 @@ jobs:
       - name: Build signed release APK
         env:
           DOCKER: docker
+          # Ship both the 64-bit ARM ABI (real devices) and x86_64 (emulators).
+          ABIS: arm64-v8a x86_64
           NAIROBI_KEYSTORE: ${{ runner.temp }}/nairobi-release.jks
           NAIROBI_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
           NAIROBI_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}

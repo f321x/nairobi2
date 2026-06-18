@@ -1095,6 +1095,13 @@ impl Controller {
             ctrl.set_wallet_busy("Getting a deposit address…");
             ctrl.wallet.receive_onchain();
         });
+        hook!(on_wallet_copy, |ctrl, text: slint::SharedString| {
+            if text.is_empty() {
+                return;
+            }
+            ctrl.platform.copy_to_clipboard(&text);
+            ctrl.toast("Copied to clipboard");
+        });
         hook!(on_wallet_pay_invoice, |ctrl, bolt11: slint::SharedString| {
             ctrl.wallet_pay_invoice(bolt11.to_string());
         });

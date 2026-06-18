@@ -1165,6 +1165,7 @@ component WalletScreen inherits Rectangle {
     callback refresh();
     callback receive-lightning(string);
     callback receive-onchain();
+    callback copy(string);
     callback pay-invoice(string);
     callback pay-mpesa(string, string);
     callback send-onchain(string, string);
@@ -1272,22 +1273,36 @@ component WalletScreen inherits Rectangle {
                             }
                             SmallButton { text: "Get invoice"; clicked => { root.receive-lightning(ln-amt.text); } }
                         }
-                        if root.invoice != "" : Text {
-                            text: root.invoice;
-                            color: Theme.muted;
-                            font-size: 11px;
-                            wrap: char-wrap;
+                        if root.invoice != "" : VerticalLayout {
+                            spacing: 6px;
+                            Text {
+                                text: root.invoice;
+                                color: Theme.muted;
+                                font-size: 11px;
+                                wrap: char-wrap;
+                            }
+                            HorizontalLayout {
+                                alignment: start;
+                                SmallButton { text: "📋 Copy invoice"; clicked => { root.copy(root.invoice); } }
+                            }
                         }
 
                         Rectangle { height: 1px; background: Theme.line; }
 
                         Text { text: "🔗 On-chain"; color: Theme.text; font-size: 16px; font-weight: 700; }
                         SmallButton { text: "Get deposit address"; clicked => { root.receive-onchain(); } }
-                        if root.deposit-address != "" : Text {
-                            text: root.deposit-address;
-                            color: Theme.muted;
-                            font-size: 11px;
-                            wrap: char-wrap;
+                        if root.deposit-address != "" : VerticalLayout {
+                            spacing: 6px;
+                            Text {
+                                text: root.deposit-address;
+                                color: Theme.muted;
+                                font-size: 11px;
+                                wrap: char-wrap;
+                            }
+                            HorizontalLayout {
+                                alignment: start;
+                                SmallButton { text: "📋 Copy address"; clicked => { root.copy(root.deposit-address); } }
+                            }
                         }
                     }
                 }
@@ -1478,6 +1493,7 @@ export component MainWindow inherits Window {
     callback wallet-refresh();
     callback wallet-receive-lightning(string);
     callback wallet-receive-onchain();
+    callback wallet-copy(string);
     callback wallet-pay-invoice(string);
     callback wallet-pay-mpesa(string, string);
     callback wallet-send-onchain(string, string);
@@ -1628,6 +1644,7 @@ export component MainWindow inherits Window {
                 refresh => { root.wallet-refresh(); }
                 receive-lightning(a) => { root.wallet-receive-lightning(a); }
                 receive-onchain => { root.wallet-receive-onchain(); }
+                copy(t) => { root.wallet-copy(t); }
                 pay-invoice(i) => { root.wallet-pay-invoice(i); }
                 pay-mpesa(p, a) => { root.wallet-pay-mpesa(p, a); }
                 send-onchain(addr, a) => { root.wallet-send-onchain(addr, a); }

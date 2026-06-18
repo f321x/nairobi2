@@ -86,6 +86,11 @@ impl Platform for SimPlatform {
         log::info!("sim: open url {url}");
     }
 
+    fn copy_to_clipboard(&self, text: &str) {
+        // No system clipboard on the desktop sim; log it so the flow is visible.
+        log::info!("sim: copy to clipboard: {text}");
+    }
+
     fn notify(&self, title: &str, body: &str) {
         // The desktop build has no notification surface; log it loudly so the
         // match/arrival flows can still be exercised on a workstation.

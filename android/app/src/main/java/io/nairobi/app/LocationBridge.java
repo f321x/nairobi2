@@ -278,6 +278,31 @@ public final class LocationBridge {
         });
     }
 
+    // ---- clipboard ---------------------------------------------------------
+
+    /**
+     * Copy {@code text} to the system clipboard — lets the user paste a Lightning
+     * invoice or on-chain deposit address into another wallet to fund this one.
+     */
+    public static void copyToClipboard(final String text) {
+        final Context ctx = locationContext();
+        if (ctx == null) {
+            Log.w(TAG, "copyToClipboard: no context");
+            return;
+        }
+        post(() -> {
+            try {
+                android.content.ClipboardManager cm =
+                        ctx.getSystemService(android.content.ClipboardManager.class);
+                if (cm == null) return;
+                cm.setPrimaryClip(
+                        android.content.ClipData.newPlainText("nairobi", text));
+            } catch (Exception e) {
+                Log.e(TAG, "copyToClipboard failed", e);
+            }
+        });
+    }
+
     // ---- notifications -----------------------------------------------------
 
     /**

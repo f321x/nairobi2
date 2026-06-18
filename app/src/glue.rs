@@ -231,6 +231,19 @@ impl Platform for AndroidPlatform {
         });
     }
 
+    fn copy_to_clipboard(&self, text: &str) {
+        self.with_env("copyToClipboard", |env, class| {
+            let jtext = env.new_string(text)?;
+            env.call_static_method(
+                class,
+                "copyToClipboard",
+                "(Ljava/lang/String;)V",
+                &[JValue::Object(&jtext)],
+            )
+            .map(|_| ())
+        });
+    }
+
     fn notify(&self, title: &str, body: &str) {
         self.with_env("notify", |env, class| {
             let jtitle = env.new_string(title)?;

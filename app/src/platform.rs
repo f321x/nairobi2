@@ -43,6 +43,9 @@ pub trait Platform: Send + Sync + 'static {
     /// `https:` URI) — used to inspect a proof-of-burn notarization transaction
     /// on a block explorer. Fire-and-forget.
     fn open_url(&self, url: &str);
+    /// Copy `text` to the system clipboard — used so a Lightning invoice / on-chain
+    /// deposit address can be pasted into another wallet to fund this one. Fire-and-forget.
+    fn copy_to_clipboard(&self, text: &str);
     /// Raise a notification the user should see even when the app is backgrounded
     /// (a match found, a driver arriving). Fire-and-forget.
     fn notify(&self, title: &str, body: &str);

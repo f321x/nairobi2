@@ -1075,8 +1075,15 @@ component WalletScreen inherits Rectangle {
     in property <string> invoice;
     in property <string> deposit-address;
     in property <bool> busy;
+    // Whether a real wallet backend (a Fedimint federation) is connected. When
+    // false we show honest "configure a federation" guidance rather than mock
+    // balance / send / receive controls.
+    in property <bool> connected;
+    // Whether a federation invite has been saved (tailors the disconnected copy).
+    in property <bool> federation-configured;
 
     callback back();
+    callback open-settings();
     callback refresh();
     callback receive-lightning(string);
     callback receive-onchain();
@@ -1086,7 +1093,39 @@ component WalletScreen inherits Rectangle {
 
     VerticalLayout {
         BackBar { title: "Wallet"; back => { root.back(); } }
-        ScrollView {
+
+        // ---- no real wallet: be honest, don't fake a balance ----
+        if !root.connected : VerticalLayout {
+            padding: Theme.pad * 2;
+            spacing: 16px;
+            alignment: center;
+            Text {
+                text: "💰";
+                font-size: 64px;
+                horizontal-alignment: center;
+            }
+            Text {
+                text: root.federation-configured ? "Wallet not connected" : "No wallet yet";
+                color: Theme.text;
+                font-size: 22px;
+                font-weight: 800;
+                horizontal-alignment: center;
+                wrap: word-wrap;
+            }
+            Text {
+                text: root.status != "" ? root.status : "Add a Fedimint federation in Settings to fund a Bitcoin / Lightning wallet.";
+                color: Theme.muted;
+                font-size: 15px;
+                horizontal-alignment: center;
+                wrap: word-wrap;
+            }
+            SmallButton {
+                text: "Open Settings";
+                clicked => { root.open-settings(); }
+            }
+        }
+
+        if root.connected : ScrollView {
             vertical-stretch: 1;
             VerticalLayout {
                 padding: Theme.pad;
@@ -1115,7 +1154,7 @@ component WalletScreen inherits Rectangle {
                                 border-radius: 10px;
                                 background: refresh-t.pressed ? Theme.card.brighter(20%) : transparent;
                                 Text {
-                                    text: root.busy ? "⏳" : "⟳";
+                                    text: root.busy ? "⏳" : "🔄";
                                     color: Theme.accent;
                                     font-size: 20px;
                                     horizontal-alignment: center;
@@ -1164,7 +1203,7 @@ component WalletScreen inherits Rectangle {
 
                         Rectangle { height: 1px; background: Theme.line; }
 
-                        Text { text: "₿ On-chain"; color: Theme.text; font-size: 16px; font-weight: 700; }
+                        Text { text: "🔗 On-chain"; color: Theme.text; font-size: 16px; font-weight: 700; }
                         SmallButton { text: "Get deposit address"; clicked => { root.receive-onchain(); } }
                         if root.deposit-address != "" : Text {
                             text: root.deposit-address;
@@ -1233,7 +1272,7 @@ component WalletScreen inherits Rectangle {
                                 placeholder-text: "amount in sat";
                                 input-type: InputType.number;
                             }
-                            SmallButton { text: "Send ₿"; clicked => { root.send-onchain(addr-in.text, oc-amt.text); } }
+                            SmallButton { text: "Send on-chain"; clicked => { root.send-onchain(addr-in.text, oc-amt.text); } }
                         }
                     }
                 }
@@ -1304,6 +1343,8 @@ export component MainWindow inherits Window {
     in property <string> federation-status: "Not set";
 
     // ---- wallet ----
+    in property <bool> wallet-connected: false;
+    in property <bool> federation-configured: false;
     in property <string> wallet-balance: "0";
     in property <string> wallet-status: "";
     in property <string> wallet-invoice: "";
@@ -1491,12 +1532,15 @@ export component MainWindow inherits Window {
             }
 
             if root.screen == 7 : WalletScreen {
+                connected: root.wallet-connected;
+                federation-configured: root.federation-configured;
                 balance: root.wallet-balance;
                 status: root.wallet-status;
                 invoice: root.wallet-invoice;
                 deposit-address: root.wallet-deposit-address;
                 busy: root.wallet-busy;
                 back => { root.back-home(); }
+                open-settings => { root.open-settings(); }
                 refresh => { root.wallet-refresh(); }
                 receive-lightning(a) => { root.wallet-receive-lightning(a); }
                 receive-onchain => { root.wallet-receive-onchain(); }
@@ -1517,7 +1561,7 @@ export component MainWindow inherits Window {
         height: 44px;
         border-radius: 22px;
         background: gt.pressed ? Theme.card-alt : transparent;
-        Text { text: "⚙"; font-size: 24px; color: Theme.text;
+        Text { text: "⚙️"; font-size: 24px; color: Theme.text;
             horizontal-alignment: center; vertical-alignment: center; }
         gt := TouchArea { clicked => { root.open-settings(); } }
     }

@@ -95,6 +95,11 @@ struct RateSetup {
 /// The wallet screen's view state, folded from [`WalletEvent`]s.
 #[derive(Default)]
 struct WalletView {
+    /// Whether a *real* wallet backend is connected (a Fedimint federation).
+    /// `false` for the in-memory fallback — the wallet screen uses this to stay
+    /// honest (it shows "configure a federation" guidance instead of a mock
+    /// balance and fake send/receive controls).
+    connected: bool,
     /// Latest spendable balance.
     balance: Amount,
     /// A one-line status / last-result message.
@@ -488,7 +493,7 @@ impl Controller {
                 WalletEvent::DepositAddress(addr) => {
                     w.busy = false;
                     w.deposit_address = addr;
-                    w.status = "₿ on-chain deposit address ready".into();
+                    w.status = "🔗 on-chain deposit address ready".into();
                 }
                 WalletEvent::PaymentSucceeded { kind, fees, .. } => {
                     w.busy = false;
@@ -505,7 +510,10 @@ impl Controller {
                 WalletEvent::FundsReceived { amount } => {
                     w.status = format!("✓ received {amount}");
                 }
-                WalletEvent::Status { detail, .. } => w.status = detail,
+                WalletEvent::Status { connected, detail } => {
+                    w.connected = connected;
+                    w.status = detail;
+                }
             }
         }
         if refresh {
@@ -784,15 +792,20 @@ impl Controller {
         ui.set_can_request(view.pickup.is_some() && view.dropoff.is_some() && dist.is_some());
 
         // ---- wallet + federation ----
+        let fed_configured = !view.federation_invite.is_empty();
+        ui.set_wallet_connected(view.wallet.connected);
+        ui.set_federation_configured(fed_configured);
         ui.set_wallet_balance(view.wallet.balance.sats().to_string().into());
         ui.set_wallet_status(view.wallet.status.clone().into());
         ui.set_wallet_invoice(view.wallet.invoice.clone().into());
         ui.set_wallet_deposit_address(view.wallet.deposit_address.clone().into());
         ui.set_wallet_busy(view.wallet.busy);
-        let fed_status: slint::SharedString = if view.federation_invite.is_empty() {
+        let fed_status: slint::SharedString = if !fed_configured {
             "Not set — paste a federation invite".into()
+        } else if view.wallet.connected {
+            "Configured — wallet connected".into()
         } else {
-            "Configured ✓".into()
+            "Configured — connecting…".into()
         };
         ui.set_federation_status(fed_status);
     }
@@ -1229,13 +1242,24 @@ fn build_wallet(
         }
     }
 
-    // Unused when the `fedimint` feature is off.
-    let _ = (&data_dir, &federation_invite, rt);
+    // No real wallet backend: either no federation is configured, the connection
+    // failed, or this build was compiled without the `fedimint` feature. Report
+    // `connected: false` with an honest message so the wallet screen guides the
+    // user to configure a federation instead of showing a fake balance. The
+    // in-memory fallback keeps the rest of the app from panicking on a missing
+    // wallet; its (zero) balance is never shown while disconnected.
+    let _ = (&data_dir, rt);
+    let detail = match federation_invite.as_deref() {
+        Some(invite) if !invite.is_empty() => {
+            "Could not connect to your Fedimint federation. Check the invite in Settings and restart."
+        }
+        _ => "No wallet yet. Add a Fedimint federation in Settings to fund a Bitcoin / Lightning wallet.",
+    };
     let _ = wallet_tx.send(WalletEvent::Status {
         connected: false,
-        detail: "Simulated wallet — set a Fedimint federation in Settings for real funds".into(),
+        detail: detail.into(),
     });
-    Arc::new(MockWallet::with_balance(wallet_tx, Amount::from_sats(50_000)))
+    Arc::new(MockWallet::new(wallet_tx))
 }
 
 /// Parse a positive whole-sat amount from a text field (`None` if blank/invalid).

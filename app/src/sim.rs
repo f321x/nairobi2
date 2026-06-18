@@ -86,4 +86,9 @@ impl Platform for SimPlatform {
         // match/arrival flows can still be exercised on a workstation.
         log::warn!("sim: 🔔 NOTIFICATION — {title}: {body}");
     }
+
+    fn exit_app(&self) {
+        // No activity to finish on the desktop; back-from-Home is a no-op here.
+        log::info!("sim: exit_app (no-op on desktop)");
+    }
 }

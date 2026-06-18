@@ -69,6 +69,16 @@ pub fn at_max(elapsed_secs: u64) -> bool {
     elapsed_secs >= ESCALATION_SECS
 }
 
+/// Seconds remaining until the next rate step, while escalation is still
+/// running. Counts down `STEP_SECS`→1 within each step and resets; returns
+/// `None` once the rate has reached `max_rate` (no further steps).
+pub fn secs_to_next_step(elapsed_secs: u64) -> Option<u64> {
+    if at_max(elapsed_secs) {
+        return None;
+    }
+    Some(STEP_SECS - (elapsed_secs % STEP_SECS))
+}
+
 /// Whether the request has outlived [`MAX_LIFETIME_SECS`] and should stop.
 pub fn is_expired(elapsed_secs: u64) -> bool {
     elapsed_secs >= MAX_LIFETIME_SECS
@@ -150,6 +160,19 @@ mod tests {
         let a = Auction::new(20, 120);
         assert_eq!(a.fare_at(0, 5.0), 100); // 20 * 5
         assert_eq!(a.fare_at(ESCALATION_SECS, 5.0), 600); // 120 * 5
+    }
+
+    #[test]
+    fn countdown_to_next_step() {
+        // Counts down within a step and resets at each boundary.
+        assert_eq!(secs_to_next_step(0), Some(30));
+        assert_eq!(secs_to_next_step(1), Some(29));
+        assert_eq!(secs_to_next_step(29), Some(1));
+        assert_eq!(secs_to_next_step(30), Some(30));
+        assert_eq!(secs_to_next_step(45), Some(15));
+        // No more steps once the rate has reached max.
+        assert_eq!(secs_to_next_step(ESCALATION_SECS), None);
+        assert_eq!(secs_to_next_step(ESCALATION_SECS + 100), None);
     }
 
     #[test]

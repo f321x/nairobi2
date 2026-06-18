@@ -104,6 +104,9 @@ pub struct PassengerSnapshot {
     pub fare_estimate: u32,
     pub elapsed_secs: u64,
     pub at_max: bool,
+    /// Seconds until the rate steps up again while still escalating; `None`
+    /// once the rate has reached its maximum (the UI hides the countdown then).
+    pub secs_to_next_step: Option<u64>,
     pub currency: String,
     pub driver: Option<String>,
     pub driver_name: Option<String>,
@@ -671,7 +674,6 @@ impl<P: Pool> Engine<P> {
                     p.published_ids.insert(id);
                 }
             }
-            self.emit_passenger();
         }
         if let (Some(to), Some(loc)) = (beacon_to, self.location) {
             self.publish_beacon(to, loc);
@@ -686,8 +688,16 @@ impl<P: Pool> Engine<P> {
         if resolve {
             self.resolve_match();
         }
-        // An expired search needs a UI update.
-        if matches!(&self.role, Role::Passenger(p) if p.phase == PassengerPhase::Expired) {
+        // While searching, refresh the passenger UI every tick (not only when
+        // the rate steps) so the elapsed clock and the rate-step countdown
+        // advance once a second. Other phases update on their own events (a
+        // match, a beacon, a DM), so we avoid a needless per-second repaint of
+        // the trip/chat screens (which carry a text input).
+        if matches!(
+            &self.role,
+            Role::Passenger(p)
+                if matches!(p.phase, PassengerPhase::Searching | PassengerPhase::Expired)
+        ) {
             self.emit_passenger();
         }
     }
@@ -765,6 +775,7 @@ impl<P: Pool> Engine<P> {
                 fare_estimate: p.request.fare_estimate,
                 elapsed_secs: elapsed,
                 at_max: auction::at_max(elapsed),
+                secs_to_next_step: auction::secs_to_next_step(elapsed),
                 currency: p.request.currency.clone(),
                 driver: p.driver.map(|d| d.to_hex()),
                 driver_name,

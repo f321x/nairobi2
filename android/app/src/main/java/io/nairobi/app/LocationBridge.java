@@ -53,6 +53,9 @@ public final class LocationBridge {
     /** The runtime permission request resolved. Registered as {@code (Z)V}. */
     static native void nativeOnPermission(boolean granted);
 
+    /** The system back gesture/button. Registered by Rust as sig {@code ()V}. */
+    static native void nativeOnBack();
+
     // ---- context resolution -----------------------------------------------
 
     /**
@@ -185,6 +188,30 @@ public final class LocationBridge {
             LocationService.unsubscribe(ctx);
             ctx.stopService(new Intent(ctx, LocationService.class));
         });
+    }
+
+    // ---- back navigation ---------------------------------------------------
+
+    /**
+     * Forward a system back press to Rust, which decides whether to navigate to
+     * the previous screen or (only from Home) exit via {@link #finishActivity}.
+     * The activity always consumes the event, so if native is not yet ready we
+     * fall back to finishing the activity rather than trapping the user.
+     */
+    static void dispatchBack() {
+        try {
+            nativeOnBack();
+        } catch (UnsatisfiedLinkError e) {
+            Log.e(TAG, "native back not ready; finishing activity", e);
+            finishActivity();
+        }
+    }
+
+    /** Close the app — called by Rust when back is pressed on the Home screen. */
+    public static void finishActivity() {
+        final Activity activity = MainActivity.current();
+        if (activity == null) return;
+        activity.runOnUiThread(activity::finish);
     }
 
     /** Forwarded by {@link LocationService} for each location fix. */

@@ -16,6 +16,9 @@ pub enum PlatformEvent {
     /// Result of a permission request triggered by
     /// [`Platform::request_location_permission`].
     PermissionResult(bool),
+    /// The system back gesture / button was pressed. The controller maps it to
+    /// the previous in-app screen, and only exits the app when already at Home.
+    Back,
 }
 
 /// The OS surface the app needs beyond the UI toolkit. A single trait with two
@@ -39,4 +42,8 @@ pub trait Platform: Send + Sync + 'static {
     /// Raise a notification the user should see even when the app is backgrounded
     /// (a match found, a driver arriving). Fire-and-forget.
     fn notify(&self, title: &str, body: &str);
+    /// Close the app (finish the Android activity). Called by the controller when
+    /// the back gesture is pressed while already on the Home screen, so back from
+    /// the root exits as the user expects. Fire-and-forget; a no-op off Android.
+    fn exit_app(&self);
 }

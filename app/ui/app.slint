@@ -204,6 +204,9 @@ component MapView inherits Rectangle {
     in property <string> other-label;
     // Whether a tap sets the dropoff (Request screen) vs. just pans.
     in property <bool> tap-sets-dropoff: false;
+    // A fixed crosshair at the viewport centre, used to pinpoint pickup/drop-off
+    // on the Request screen (pan the map under it, then confirm).
+    in property <bool> show-center-pin: false;
 
     callback tapped(length, length);  // px relative to centre
     callback panned(length, length);
@@ -302,6 +305,33 @@ component MapView inherits Rectangle {
         }
     }
 
+    // Fixed centre crosshair (pinpoint helper). Stays at the viewport centre as
+    // the map pans beneath it; non-interactive so it never blocks a pan/tap.
+    if root.show-center-pin : Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 38px;
+        height: 38px;
+        // outer ring
+        Rectangle {
+            width: 100%;
+            height: 100%;
+            border-radius: self.width / 2;
+            border-width: 3px;
+            border-color: Theme.accent;
+            background: #16a34a22;
+        }
+        // centre dot (the exact point)
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 7px;
+            height: 7px;
+            border-radius: 3.5px;
+            background: Theme.accent;
+        }
+    }
+
     // zoom controls (right edge)
     VerticalLayout {
         x: parent.width - self.width - 12px;
@@ -334,7 +364,7 @@ component MapView inherits Rectangle {
         border-radius: 15px;
         background: #000000bb;
         hint := Text {
-            text: "Tap the map to set drop-off 🏁";
+            text: "Centre the ◎ on a spot, then Set pickup / drop-off";
             color: #ffffff;
             font-size: 13px;
             horizontal-alignment: center;
@@ -436,6 +466,8 @@ component RequestScreen inherits Rectangle {
     callback map-zoom-in();
     callback map-zoom-out();
     callback search(string);
+    callback set-pickup-here();
+    callback set-dropoff-here();
     callback start-rate-inc();
     callback start-rate-dec();
     callback max-rate-inc();
@@ -453,6 +485,7 @@ component RequestScreen inherits Rectangle {
                 height: 100%;
                 map-image: root.map-image;
                 tap-sets-dropoff: true;
+                show-center-pin: true;
                 show-pickup: root.show-pickup;
                 pickup-dx: root.pickup-dx;
                 pickup-dy: root.pickup-dy;
@@ -480,6 +513,20 @@ component RequestScreen inherits Rectangle {
                 search-input := LineEdit {
                     placeholder-text: "Search a place (optional)…";
                     accepted(t) => { root.search(t); }
+                }
+
+                // Pinpoint controls: pan the map so the centre crosshair sits on
+                // the exact spot, then drop the pickup (🧍) or drop-off (🏁) there.
+                HorizontalLayout {
+                    spacing: 8px;
+                    SmallButton {
+                        text: "🧍 Set pickup";
+                        clicked => { root.set-pickup-here(); }
+                    }
+                    SmallButton {
+                        text: "🏁 Set drop-off";
+                        clicked => { root.set-dropoff-here(); }
+                    }
                 }
 
                 // start rate stepper
@@ -556,6 +603,7 @@ component WaitingScreen inherits Rectangle {
     in property <string> elapsed;       // "1:23"
     in property <string> status-line;   // "Searching…" / "At max rate"
     in property <bool> at-max;
+    in property <string> countdown;     // "↑ rate rises in 12s" (empty once at max)
 
     callback map-viewport(length, length);
     callback map-panned(length, length);
@@ -609,6 +657,14 @@ component WaitingScreen inherits Rectangle {
                     text: root.currency + " /km · est. fare " + root.fare-estimate + " " + root.currency;
                     color: Theme.text;
                     font-size: 15px;
+                    horizontal-alignment: center;
+                }
+                // Live countdown to the next rate increase (hidden once at max).
+                if root.countdown != "" : Text {
+                    text: root.countdown;
+                    color: Theme.accent;
+                    font-size: 16px;
+                    font-weight: 700;
                     horizontal-alignment: center;
                 }
                 Text {
@@ -1228,6 +1284,7 @@ export component MainWindow inherits Window {
     in property <string> waiting-elapsed: "0:00";
     in property <string> waiting-status: "Searching…";
     in property <bool> waiting-at-max: false;
+    in property <string> waiting-countdown: "";
 
     // ---- driver list ----
     in property <[OfferItem]> offers;
@@ -1264,6 +1321,8 @@ export component MainWindow inherits Window {
 
     // request
     callback search(string);
+    callback set-pickup-here();
+    callback set-dropoff-here();
     callback map-tapped(length, length);
     callback map-panned(length, length);
     callback map-viewport(length, length);
@@ -1344,6 +1403,8 @@ export component MainWindow inherits Window {
                 map-zoom-in => { root.map-zoom-in(); }
                 map-zoom-out => { root.map-zoom-out(); }
                 search(t) => { root.search(t); }
+                set-pickup-here => { root.set-pickup-here(); }
+                set-dropoff-here => { root.set-dropoff-here(); }
                 start-rate-inc => { root.start-rate-inc(); }
                 start-rate-dec => { root.start-rate-dec(); }
                 max-rate-inc => { root.max-rate-inc(); }
@@ -1368,6 +1429,7 @@ export component MainWindow inherits Window {
                 elapsed: root.waiting-elapsed;
                 status-line: root.waiting-status;
                 at-max: root.waiting-at-max;
+                countdown: root.waiting-countdown;
                 map-panned(x, y) => { root.map-panned(x, y); }
                 map-viewport(w, h) => { root.map-viewport(w, h); }
                 map-zoom-in => { root.map-zoom-in(); }

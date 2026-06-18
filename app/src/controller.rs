@@ -325,6 +325,54 @@ impl Controller {
                     self.toast("Location permission is needed to use the app");
                 }
             }
+            PlatformEvent::Back => self.on_back(),
+        }
+    }
+
+    /// Handle the system back gesture: navigate to the previous in-app screen
+    /// instead of letting Android close the app. Only when already at Home do we
+    /// actually exit. The activity always lets us consume the event, so every
+    /// branch here is responsible for either moving the user or exiting.
+    fn on_back(self: &Arc<Self>) {
+        let screen = self.view.lock().unwrap().screen_i;
+        match screen {
+            s if s == Screen::Chat as i32 => {
+                // Chat is an overlay over the trip; back returns to the trip.
+                {
+                    let mut v = self.view.lock().unwrap();
+                    v.in_chat = false;
+                    v.screen_i = Screen::Trip as i32;
+                }
+                self.render_now();
+            }
+            s if s == Screen::Settings as i32 || s == Screen::Wallet as i32 => {
+                // Reached from Home; back just returns there (role unchanged).
+                self.view.lock().unwrap().screen_i = Screen::Home as i32;
+                self.render_now();
+            }
+            s if s == Screen::Trip as i32 => {
+                // Don't abandon an in-progress ride on a stray back; consume it
+                // (the app stays put) — the trip ends via COMPLETE.
+            }
+            s if s == Screen::Request as i32
+                || s == Screen::Waiting as i32
+                || s == Screen::DriverList as i32 =>
+            {
+                // Leaving these returns Home and takes us out of the role
+                // (cancels a search / goes offline) — same as the on-screen back.
+                {
+                    let mut v = self.view.lock().unwrap();
+                    v.screen_i = Screen::Home as i32;
+                    v.passenger = None;
+                    v.driver = None;
+                    v.in_chat = false;
+                }
+                let _ = self.cmd_tx.send(EngineCmd::GoIdle);
+                self.platform.stop_location();
+                self.render_now();
+            }
+            // Already at Home (or any unknown screen): back exits the app.
+            _ => self.platform.exit_app(),
         }
     }
 
@@ -559,9 +607,16 @@ impl Controller {
     pub fn tick(self: &Arc<Self>) {
         let now = unix_now();
         let _ = self.cmd_tx.send(EngineCmd::Tick { now });
-        // toast expiry is handled in render(); poke a render so the countdown /
-        // elapsed labels stay live.
-        self.render_now();
+        // The live ride timers (rate countdown, elapsed clock) are repainted by
+        // the per-tick passenger snapshot the engine emits, so we only need a
+        // render here to expire a pending toast. Skipping the render otherwise
+        // avoids re-pushing the window's properties every second, which on
+        // Android resets the soft keyboard (IME) — e.g. snapping it back from
+        // the digits page to letters — while the user is typing in a text field.
+        let has_toast = self.view.lock().unwrap().toast.is_some();
+        if has_toast {
+            self.render_now();
+        }
     }
 
     // ---- render -----------------------------------------------------------
@@ -626,6 +681,16 @@ impl Controller {
                 ui.set_waiting_fare(p.fare_estimate.to_string().into());
                 ui.set_waiting_elapsed(fmt_clock(p.elapsed_secs).into());
                 ui.set_waiting_at_max(p.at_max);
+                // Live countdown to the next rate increase (blank once at max).
+                ui.set_waiting_countdown(
+                    match p.secs_to_next_step {
+                        Some(secs) if p.phase == PassengerPhase::Searching => {
+                            format!("↑ rate rises in {secs}s")
+                        }
+                        _ => String::new(),
+                    }
+                    .into(),
+                );
                 ui.set_waiting_status(
                     match p.phase {
                         PassengerPhase::Searching if p.at_max => "At max rate — still searching",
@@ -834,6 +899,12 @@ impl Controller {
         hook!(on_search, |ctrl, query: slint::SharedString| {
             ctrl.search(query.to_string());
         });
+        hook!(on_set_pickup_here, |ctrl| {
+            ctrl.place_at_center(true);
+        });
+        hook!(on_set_dropoff_here, |ctrl| {
+            ctrl.place_at_center(false);
+        });
         hook!(on_start_rate_inc, |ctrl| {
             ctrl.adjust_rate(true, RATE_STEP as i64);
         });
@@ -977,6 +1048,23 @@ impl Controller {
                 v.rate.max = n.max(v.rate.start);
             }
         }
+        self.render_now();
+    }
+
+    /// Place the pickup (or drop-off) at the current map centre — the spot under
+    /// the fixed crosshair on the Request screen. Lets the user pinpoint a point
+    /// precisely by panning rather than tapping a small target.
+    fn place_at_center(self: &Arc<Self>, is_pickup: bool) {
+        {
+            let mut v = self.view.lock().unwrap();
+            let coord = LatLng::new(v.map.center_lat, v.map.center_lng);
+            if is_pickup {
+                v.pickup = Some(coord);
+            } else {
+                v.dropoff = Some(coord);
+            }
+        }
+        self.recompute_route();
         self.render_now();
     }
 

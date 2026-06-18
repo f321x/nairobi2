@@ -5,6 +5,8 @@ import android.os.Build;
 import android.os.Bundle;
 import android.view.View;
 import android.view.WindowManager;
+import android.window.OnBackInvokedCallback;
+import android.window.OnBackInvokedDispatcher;
 
 /**
  * Thin NativeActivity subclass. All UI lives in Rust (Slint); this class
@@ -21,6 +23,9 @@ public class MainActivity extends NativeActivity {
 
     private static volatile MainActivity sInstance;
 
+    /** Registered on API 33+ so the predictive back gesture routes to Rust. */
+    private OnBackInvokedCallback backCallback;
+
     /** The currently alive activity, or null between destroy and recreate. */
     static MainActivity current() {
         return sInstance;
@@ -35,6 +40,34 @@ public class MainActivity extends NativeActivity {
         // continuously interacted with.
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         setupEdgeToEdge();
+        registerBackHandler();
+    }
+
+    /**
+     * Intercept the system back gesture/button so it walks back through the
+     * in-app screens instead of finishing the activity (the default for a
+     * NativeActivity, which would close the app on the first back). The press is
+     * forwarded to Rust, which navigates — and only calls {@link
+     * LocationBridge#finishActivity} to actually exit when already on Home.
+     *
+     * On API 33+ we register an {@link OnBackInvokedCallback} (this is also what
+     * drives the predictive-back animation, enabled via the manifest); on older
+     * releases the deprecated {@link #onBackPressed} override below handles it.
+     */
+    private void registerBackHandler() {
+        if (Build.VERSION.SDK_INT >= 33) {
+            backCallback = LocationBridge::dispatchBack;
+            getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+                    OnBackInvokedDispatcher.PRIORITY_DEFAULT, backCallback);
+        }
+    }
+
+    @Override
+    @SuppressWarnings("deprecation") // legacy path for API < 33 (and when the
+    // OnBackInvokedCallback is not active); we deliberately do not call super so
+    // the activity is never finished here — Rust decides via finishActivity().
+    public void onBackPressed() {
+        LocationBridge.dispatchBack();
     }
 
     @Override
@@ -69,6 +102,10 @@ public class MainActivity extends NativeActivity {
 
     @Override
     protected void onDestroy() {
+        if (Build.VERSION.SDK_INT >= 33 && backCallback != null) {
+            getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(backCallback);
+            backCallback = null;
+        }
         if (sInstance == this) {
             sInstance = null;
         }

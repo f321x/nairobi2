@@ -67,6 +67,12 @@ fn register_bridge_natives(env: &mut JNIEnv, bridge_class: &JClass) -> Result<()
                 sig: "(Z)V".into(),
                 fn_ptr: native_on_permission as *mut c_void,
             },
+            NativeMethod {
+                // static native void nativeOnBack()
+                name: "nativeOnBack".into(),
+                sig: "()V".into(),
+                fn_ptr: native_on_back as *mut c_void,
+            },
         ],
     )
     .map_err(|e| format!("register natives: {e}"))
@@ -225,6 +231,13 @@ impl Platform for AndroidPlatform {
             .map(|_| ())
         });
     }
+
+    fn exit_app(&self) {
+        self.with_env("finishActivity", |env, class| {
+            env.call_static_method(class, "finishActivity", "()V", &[])
+                .map(|_| ())
+        });
+    }
 }
 
 /// `static native void nativeOnLocation(double lat, double lng)` — called by
@@ -245,5 +258,14 @@ extern "system" fn native_on_location(
 extern "system" fn native_on_permission(_env: JNIEnv, _class: JClass, granted: jboolean) {
     if let Some(tx) = platform_tx() {
         let _ = tx.send(PlatformEvent::PermissionResult(granted != 0));
+    }
+}
+
+/// `static native void nativeOnBack()` — the system back gesture/button, routed
+/// here so the controller can navigate to the previous screen (and only exit the
+/// app from Home) rather than letting Android finish the activity.
+extern "system" fn native_on_back(_env: JNIEnv, _class: JClass) {
+    if let Some(tx) = platform_tx() {
+        let _ = tx.send(PlatformEvent::Back);
     }
 }

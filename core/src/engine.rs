@@ -89,6 +89,10 @@ pub enum EngineCmd {
     /// A result from the [`BurnService`] (proof produced, or a third party's
     /// upvote verified). Forwarded by the controller like a [`PoolEvent`].
     Burn(BurnOutcome),
+    /// Restore previously-persisted burns into the ledger + transparency list on
+    /// startup (sent once by the controller before resuming the watches), so the
+    /// balance is correct immediately and offline.
+    SeedBurns(Vec<SeedBurn>),
 }
 
 /// One chat message in a matched ride.
@@ -187,6 +191,19 @@ pub struct Notarization {
     pub confirmed: bool,
     /// Engine-clock unix seconds when we recorded it.
     pub at: u64,
+}
+
+/// One persisted burn replayed into the engine on startup (from
+/// [`crate::burn::watch::PersistedBurn`]) so the balance is restored before any
+/// network re-verification. The leaf hash is the stable dedup key.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SeedBurn {
+    pub leaf: String,
+    pub value_msat: u64,
+    pub confirmed: bool,
+    pub txid: String,
+    pub label: String,
+    pub counterparty: Option<String>,
 }
 
 /// What the engine renders to the UI.
@@ -384,6 +401,7 @@ impl<P: Pool> Engine<P> {
                 self.emit_current();
             }
             EngineCmd::Burn(outcome) => self.on_burn(outcome),
+            EngineCmd::SeedBurns(seeds) => self.seed_burns(seeds),
         }
     }
 
@@ -833,6 +851,82 @@ impl<P: Pool> Engine<P> {
         }
     }
 
+    /// Record one of *our own* verified burns into the reputation ledger and the
+    /// transparency list, deduped/upgraded by leaf hash. Returns `true` when this
+    /// was a genuine state change — a brand-new burn or a mempool→confirmed
+    /// upgrade — and `false` for a bare RBF txid refresh (the txid is still
+    /// updated in place, but the caller shouldn't re-toast / re-publish).
+    fn record_own_burn(
+        &mut self,
+        leaf: String,
+        value_msat: u64,
+        confirmed: bool,
+        txid: String,
+        label: &str,
+        counterparty: Option<String>,
+    ) -> bool {
+        const MAX_NOTARIZATIONS: usize = 50;
+        let was_confirmed = self
+            .notarizations
+            .iter()
+            .find(|n| n.leaf == leaf)
+            .map(|n| n.confirmed);
+        let state_changed = was_confirmed.is_none() || (confirmed && was_confirmed == Some(false));
+
+        self.reputation.record(
+            leaf.clone(),
+            BurnRecord {
+                pubkey: self.me.to_hex(),
+                value_msat,
+                confirmed,
+                counterparty,
+            },
+        );
+        let entry = Notarization {
+            leaf: leaf.clone(),
+            txid,
+            label: label.to_string(),
+            amount_sats: value_msat / 1000,
+            confirmed,
+            at: self.now,
+        };
+        match self.notarizations.iter_mut().find(|n| n.leaf == leaf) {
+            // Refresh in place (RBF txid / mempool→confirmed upgrade), but never
+            // downgrade an already-confirmed entry — mirrors the ledger, and
+            // guards against a stale unconfirmed re-emit racing a confirmed one.
+            Some(existing) if !existing.confirmed || confirmed => *existing = entry,
+            Some(_) => {}
+            None => {
+                self.notarizations.insert(0, entry);
+                self.notarizations.truncate(MAX_NOTARIZATIONS);
+            }
+        }
+        state_changed
+    }
+
+    /// Emit the current proof-of-burn balance: the transparency list plus the
+    /// confirmed total and the still-pending (mempool) amount.
+    fn emit_reputation(&self) {
+        let me = self.me.to_hex();
+        let confirmed = self.reputation.score_sats(&me);
+        let provisional = self.reputation.provisional_sats(&me);
+        self.emit(UiEvent::Notarizations {
+            items: self.notarizations.clone(),
+            reputation_sats: confirmed,
+            pending_sats: provisional.saturating_sub(confirmed),
+        });
+    }
+
+    /// Seed the ledger + transparency list from persisted burns on startup, so
+    /// the balance is correct immediately and offline (before any network watch
+    /// re-confirms). Deduped/upgraded by leaf hash like a live burn.
+    fn seed_burns(&mut self, seeds: Vec<SeedBurn>) {
+        for s in seeds {
+            self.record_own_burn(s.leaf, s.value_msat, s.confirmed, s.txid, &s.label, s.counterparty);
+        }
+        self.emit_reputation();
+    }
+
     /// Handle a result pushed back by the [`BurnService`].
     fn on_burn(&mut self, outcome: BurnOutcome) {
         match outcome {
@@ -841,63 +935,42 @@ impl<P: Pool> Engine<P> {
                 proof,
                 counterparty,
             } => {
-                // Publish the proof (kind 30021) for others to discover, and
-                // credit ourselves locally.
-                match protocol::build_upvoting_event(&self.keys, &proof, Some(&self.me)) {
-                    Ok(ev) => self.pool.publish(ev),
-                    Err(e) => log::warn!("build upvoting event: {e}"),
-                }
                 let leaf = crate::burn::to_hex(&proof.leaf_hash());
                 let confirmed_now = proof.is_confirmed();
                 let sats = proof.leaf_value_msat / 1000;
-                self.reputation.record(
-                    leaf.clone(),
-                    BurnRecord {
-                        pubkey: self.me.to_hex(),
-                        value_msat: proof.leaf_value_msat,
-                        confirmed: confirmed_now,
-                        counterparty,
-                    },
+                // Record into the ledger + transparency list (deduped/upgraded by
+                // leaf hash). `state_changed` is true only on a genuinely new burn
+                // or a mempool→confirmed upgrade — *not* a bare RBF txid refresh,
+                // which keeps the balance and entry current without spamming a
+                // toast or re-publishing the kind-30021 event each replacement.
+                let state_changed = self.record_own_burn(
+                    leaf,
+                    proof.leaf_value_msat,
+                    confirmed_now,
+                    proof.txid.clone(),
+                    purpose.label(),
+                    counterparty,
                 );
-                let (toast_what, label) = match purpose {
-                    BurnPurpose::Bond => ("bond", "Identity bond"),
-                    BurnPurpose::Ride => ("ride", "Ride"),
-                    BurnPurpose::Boost => ("boost", "Boost"),
-                };
-                // A mempool burn is provisional (it doesn't count toward gating
-                // until it confirms); say so rather than implying it's durable.
-                self.emit(UiEvent::Toast(if confirmed_now {
-                    format!("{toast_what} reputation +{sats} sat")
-                } else {
-                    format!("{toast_what} burn pending +{sats} sat (mempool)")
-                }));
-                // Record the notarization tx for the transparency list, keyed by
-                // leaf hash: a mempool entry is upgraded in place once the burn
-                // confirms (the RBF'd txid changes), instead of showing twice.
-                const MAX_NOTARIZATIONS: usize = 50;
-                let entry = Notarization {
-                    leaf: leaf.clone(),
-                    txid: proof.txid.clone(),
-                    label: label.to_string(),
-                    amount_sats: sats,
-                    confirmed: confirmed_now,
-                    at: self.now,
-                };
-                match self.notarizations.iter_mut().find(|n| n.leaf == leaf) {
-                    Some(existing) => *existing = entry,
-                    None => {
-                        self.notarizations.insert(0, entry);
-                        self.notarizations.truncate(MAX_NOTARIZATIONS);
+                if state_changed {
+                    // Publish the proof (kind 30021) for others to discover.
+                    match protocol::build_upvoting_event(&self.keys, &proof, Some(&self.me)) {
+                        Ok(ev) => self.pool.publish(ev),
+                        Err(e) => log::warn!("build upvoting event: {e}"),
                     }
+                    let what = match purpose {
+                        BurnPurpose::Bond => "bond",
+                        BurnPurpose::Ride => "ride",
+                        BurnPurpose::Boost => "boost",
+                    };
+                    // A mempool burn is provisional (it doesn't count toward
+                    // gating until it confirms); say so rather than imply durable.
+                    self.emit(UiEvent::Toast(if confirmed_now {
+                        format!("{what} reputation +{sats} sat")
+                    } else {
+                        format!("{what} burn pending +{sats} sat (mempool)")
+                    }));
                 }
-                let me = self.me.to_hex();
-                let confirmed = self.reputation.score_sats(&me);
-                let provisional = self.reputation.provisional_sats(&me);
-                self.emit(UiEvent::Notarizations {
-                    items: self.notarizations.clone(),
-                    reputation_sats: confirmed,
-                    pending_sats: provisional.saturating_sub(confirmed),
-                });
+                self.emit_reputation();
                 self.emit_current();
             }
             BurnOutcome::Failed { reason, .. } => {
@@ -1247,6 +1320,21 @@ mod tests {
                 }
             }
             last
+        }
+        /// The most recent proof-of-burn balance snapshot `(items, confirmed, pending)`.
+        fn last_notarizations(&mut self) -> Option<(Vec<Notarization>, u64, u64)> {
+            let mut snap = None;
+            while let Ok(ev) = self.ui.try_recv() {
+                if let UiEvent::Notarizations {
+                    items,
+                    reputation_sats,
+                    pending_sats,
+                } = ev
+                {
+                    snap = Some((items, reputation_sats, pending_sats));
+                }
+            }
+            snap
         }
     }
 
@@ -1744,6 +1832,90 @@ mod tests {
         assert_eq!(reputation_sats, 700); // now durable
         assert_eq!(pending_sats, 0);
         assert_eq!(h.engine.reputation_sats(&keys.public_key().to_hex()), 700);
+    }
+
+    #[test]
+    fn seed_burns_restores_balance_on_startup() {
+        // The controller replays persisted burns so the balance is correct
+        // immediately and offline, before any network re-verification: a
+        // confirmed burn counts toward reputation, an unconfirmed one as pending.
+        let (mut h, _burn, _brx, keys) = burn_harness(0, 0);
+        h.engine.handle(EngineCmd::Tick { now: 1000 });
+        h.engine.handle(EngineCmd::SeedBurns(vec![
+            SeedBurn {
+                leaf: "aa".repeat(32),
+                value_msat: 500_000,
+                confirmed: true,
+                txid: "11".repeat(32),
+                label: "Identity bond".into(),
+                counterparty: None,
+            },
+            SeedBurn {
+                leaf: "bb".repeat(32),
+                value_msat: 200_000,
+                confirmed: false,
+                txid: "22".repeat(32),
+                label: "Ride".into(),
+                counterparty: Some("cp".into()),
+            },
+        ]));
+
+        let (items, reputation_sats, pending_sats) =
+            h.last_notarizations().expect("a Notarizations UiEvent");
+        assert_eq!(items.len(), 2);
+        assert_eq!(reputation_sats, 500); // confirmed only
+        assert_eq!(pending_sats, 200); // mempool-only
+        assert_eq!(h.engine.reputation_sats(&keys.public_key().to_hex()), 500);
+    }
+
+    #[test]
+    fn rbf_refresh_updates_txid_without_double_counting() {
+        // The notary RBF-replaces the batch tx often: the same burn (stable leaf)
+        // surfaces again with a new txid while still in the mempool. The balance
+        // must not double-count, and the displayed txid must track the latest tx.
+        let (mut h, _burn, _brx, _keys) = burn_harness(0, 0);
+        h.engine.handle(EngineCmd::Tick { now: 1000 });
+
+        let base = crate::burn::proof::BurnProof {
+            version: crate::burn::PROOF_VERSION,
+            chain: None,
+            event_id: [7u8; 32],
+            leaf_value_msat: 300_000,
+            nonce: [0u8; 32],
+            merkle_hashes: Vec::new(),
+            merkle_index: 0,
+            txid: crate::burn::to_hex(&[1u8; 32]),
+            block_height: 0, // mempool
+            upvoter_pubkey: None,
+            upvoter_signature: None,
+        };
+        h.engine.handle(EngineCmd::Burn(BurnOutcome::Proven {
+            purpose: BurnPurpose::Bond,
+            proof: Box::new(base.clone()),
+            counterparty: None,
+        }));
+        // RBF: same leaf, still mempool, new txid.
+        let replaced = crate::burn::proof::BurnProof {
+            txid: crate::burn::to_hex(&[2u8; 32]),
+            ..base
+        };
+        h.engine.handle(EngineCmd::Burn(BurnOutcome::Proven {
+            purpose: BurnPurpose::Bond,
+            proof: Box::new(replaced),
+            counterparty: None,
+        }));
+
+        let (items, reputation_sats, pending_sats) =
+            h.last_notarizations().expect("a Notarizations UiEvent");
+        assert_eq!(items.len(), 1, "one entry — not double-counted across RBF");
+        assert_eq!(
+            items[0].txid,
+            crate::burn::to_hex(&[2u8; 32]),
+            "txid tracks the latest tx"
+        );
+        assert!(!items[0].confirmed);
+        assert_eq!(reputation_sats, 0); // still mempool
+        assert_eq!(pending_sats, 300); // counted once, not 600
     }
 
     #[test]

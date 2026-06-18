@@ -41,6 +41,7 @@ pub mod reputation;
 pub mod service;
 pub mod tx;
 pub mod verify;
+pub mod watch;
 
 /// `OP_RETURN` magic prefix identifying a notarization commitment.
 pub const MAGIC_BYTES: [u8; 2] = [0x00, 0x21];

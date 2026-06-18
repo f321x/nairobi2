@@ -17,10 +17,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use nairobi_core::burn::electrum::ElectrumServer;
 use nairobi_core::burn::notary::NotaryClient;
 use nairobi_core::burn::service::{BurnService, NotaryBurnService};
+use nairobi_core::burn::watch::BurnStore;
 use nairobi_core::config::{ConfigStore, DEFAULT_CURRENCY};
 use nairobi_core::engine::{
     DriverPhase, DriverSnapshot, Engine, EngineCmd, Notarization, Offer, PassengerPhase,
-    PassengerSnapshot, SortKey, UiEvent,
+    PassengerSnapshot, SeedBurn, SortKey, UiEvent,
 };
 use nairobi_core::geo::routing;
 use nairobi_core::geo::LatLng;
@@ -262,6 +263,10 @@ impl Controller {
             })
         };
 
+        // Persistent store for our proof-of-burn balance (built before the data
+        // dir is moved into the wallet below; it only borrows the path).
+        let burns = Arc::new(BurnStore::new(&data_dir));
+
         // Build the modular wallet first (the proof-of-burn service pays notary
         // invoices with it). Mock by default (deterministic, no funds); the real
         // Fedimint backend is swapped in behind the `fedimint` feature. Its
@@ -272,7 +277,9 @@ impl Controller {
         // Proof-of-burn anti-sybil service: the notary (paid over Lightning via
         // the wallet) + client-side Electrum verification. Results flow back as
         // `EngineCmd::Burn`. Gating + per-ride burn are config-driven and default
-        // to off, so this is inert until the user opts in (permissionless).
+        // to off, so this is inert until the user opts in (permissionless). Our
+        // burns are persisted in `BurnStore` so the balance survives a restart
+        // and unconfirmed ones can be resumed (re-polled to confirmation) below.
         let (burn_tx, mut burn_rx) = mpsc::unbounded_channel();
         let electrum: Vec<ElectrumServer> = config
             .electrum_servers
@@ -284,12 +291,15 @@ impl Controller {
             wallet.clone(),
             NotaryClient::public(),
             electrum,
+            burns.clone(),
             rt.clone(),
             burn_tx,
             Amount::from_sats(50),
         ));
 
-        // Spawn the engine, wired to proof-of-burn.
+        // Spawn the engine, wired to proof-of-burn. Keep a handle to the burn
+        // service so we can resume persisted unconfirmed watches after startup.
+        let burn_for_resume = burn.clone();
         rt.spawn(
             Engine::with_burn(
                 keys,
@@ -301,6 +311,33 @@ impl Controller {
             )
             .run(cmd_rx),
         );
+
+        // Restore the proof-of-burn balance from disk: seed the engine with every
+        // burn we've already verified (instant + offline), then resume watching
+        // the still-unconfirmed ones until they confirm (or RBF-refresh the txid).
+        match burns.load() {
+            Ok(persisted) => {
+                let seeds: Vec<SeedBurn> = persisted
+                    .iter()
+                    .filter(|b| !b.leaf.is_empty())
+                    .map(|b| SeedBurn {
+                        leaf: b.leaf.clone(),
+                        value_msat: b.value_sats * 1000,
+                        confirmed: b.confirmed,
+                        txid: b.txid.clone(),
+                        label: b.purpose.label().to_string(),
+                        counterparty: b.counterparty.clone(),
+                    })
+                    .collect();
+                if !seeds.is_empty() {
+                    let _ = cmd_tx.send(EngineCmd::SeedBurns(seeds));
+                }
+                for b in persisted.into_iter().filter(|b| !b.confirmed) {
+                    burn_for_resume.resume(b);
+                }
+            }
+            Err(e) => log::warn!("load persisted burns: {e}"),
+        }
 
         // pool events → engine commands
         let cmd_tx2 = cmd_tx.clone();

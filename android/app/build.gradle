@@ -27,12 +27,26 @@ android {
         versionCode fromEnvOrProp('NAIROBI_VERSION_CODE', 'nairobiVersionCode', '1').toString().toInteger()
         versionName fromEnvOrProp('NAIROBI_VERSION_NAME', 'nairobiVersionName', '0.1.0').toString()
 
-        // ABIs are controlled by which jniLibs cargo-ndk produced; this
-        // filter just guards against stray folders. scripts/build-apk.sh passes
-        // -PnairobiAbis="<csv>" matching the ABIs it cross-compiled.
-        ndk {
+        // ABI handling lives in the `splits` block below — one APK per ABI.
+    }
+
+    // Emit one APK per ABI instead of a single fat APK that bundles every
+    // architecture's native libs (which would ~double the download for a device
+    // that can only ever run one of them). scripts/build-apk.sh passes
+    // -PnairobiAbis="<csv>" listing the ABIs cargo-ndk cross-compiled; each
+    // becomes its own slimmer, ABI-named APK (e.g. arm64-v8a for phones,
+    // x86_64 for emulators). No universal/fat APK is produced.
+    //
+    // All split APKs share the base versionCode above, which is fine for
+    // sideloading (the user picks the file). Publishing to Google Play would
+    // instead require per-ABI versionCode offsets.
+    splits {
+        abi {
+            enable true
+            reset()
             //noinspection ChromeOsAbiSupport
-            abiFilters = (project.findProperty('nairobiAbis') ?: 'arm64-v8a,armeabi-v7a,x86_64').split(',')
+            include(*(project.findProperty('nairobiAbis') ?: 'arm64-v8a').toString().split(','))
+            universalApk false
         }
     }
 

@@ -85,13 +85,25 @@ for abi in $ABIS; do
     fi
 done
 
-echo "==> Building $VARIANT APK"
+echo "==> Building $VARIANT APK(s) for ABIs: $ABIS"
 ABIS_CSV="${ABIS// /,}"
 (cd android && gradle --no-daemon -PnairobiAbis="$ABIS_CSV" "$GRADLE_TASK")
 
+# Gradle's ABI split emits one APK per ABI (app-<abi>-<variant>.apk); copy each
+# to its own dist/ file so x86_64 (emulator) ships separately from arm64-v8a
+# (phones) instead of as one fat APK.
 mkdir -p dist
-OUT="dist/nairobi-${VARIANT}.apk"
-cp "android/app/build/outputs/apk/${VARIANT}/app-${VARIANT}.apk" "$OUT"
+outs=()
+for abi in $ABIS; do
+    src="android/app/build/outputs/apk/${VARIANT}/app-${abi}-${VARIANT}.apk"
+    if [ ! -f "$src" ]; then
+        echo "error: expected per-ABI APK not found: $src" >&2
+        exit 1
+    fi
+    out="dist/nairobi-${VARIANT}-${abi}.apk"
+    cp "$src" "$out"
+    outs+=("$out")
+done
 
 # Bind-mounted builds may run as root (rootful Docker); hand artifacts back.
 if [ -n "${CHOWN_UID:-}" ]; then
@@ -99,5 +111,5 @@ if [ -n "${CHOWN_UID:-}" ]; then
         dist "$JNILIBS" android/app/build android/.gradle 2>/dev/null || true
 fi
 
-echo "==> Done: $OUT"
-ls -lh "$OUT"
+echo "==> Done:"
+ls -lh "${outs[@]}"

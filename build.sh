@@ -5,8 +5,8 @@
 # user (so nothing is left root-owned, even under rootful Docker).
 #
 # Usage:
-#   ./build.sh            build the debug APK          -> dist/nairobi-debug.apk
-#   ./build.sh release    build the signed release APK -> dist/nairobi-release.apk
+#   ./build.sh            build the debug APK(s)        -> dist/nairobi-debug-<abi>.apk
+#   ./build.sh release    build the signed release APKs -> dist/nairobi-release-<abi>.apk
 #   ./build.sh keystore   generate the release signing keystore in the builder
 #                         image (no host JDK needed)  -> release-signing/
 #   ./build.sh test       run the Rust test suite in the container
@@ -108,13 +108,16 @@ case "${1:-apk}" in
         build_image
         run_in_container scripts/build-apk.sh
         echo
-        echo "Install with: adb install -r dist/nairobi-debug.apk"
+        echo "Built one APK per ABI in dist/:"
+        ls -1 dist/nairobi-debug-*.apk 2>/dev/null || true
+        echo "Install with: adb install -r dist/nairobi-debug-arm64-v8a.apk"
         ;;
     release)
         build_image
         BUILD_TYPE=release run_in_container scripts/build-apk.sh
         echo
-        echo "Signed release APK: dist/nairobi-release.apk"
+        echo "Signed release APK(s) (one per ABI):"
+        ls -1 dist/nairobi-release-*.apk 2>/dev/null || true
         ;;
     keystore)
         build_image

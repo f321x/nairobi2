@@ -100,7 +100,8 @@ and the [protocol notes](docs/proof-of-burn-api.md) for the full scheme.
   crate and passes **136 unit tests**.
 - **App + Android shell + build pipeline — building.** `./build.sh` compiles the Slint UI,
   cross-compiles for `aarch64-linux-android` (Skia + android-activity + nostr-sdk), and packages a
-  valid, signed **18 MB `dist/nairobi-debug.apk`** (`io.nairobi.app`, minSdk 26). Following the
+  valid, signed **`dist/nairobi-debug-arm64-v8a.apk`** (`io.nairobi.app`, minSdk 26; one APK per
+  ABI). Following the
   proven [ntrack](https://github.com/f321x/ntrack) structure. The desktop build also runs (under a
   virtual display): the Home screen renders (above) and the app connects to live relays
   (`nos.lol`, `relay.damus.io`, `relay.primal.net`). *Full on-hardware behaviour and the live
@@ -126,8 +127,8 @@ cargo test -p nairobi-core
 cargo clippy -p nairobi-core --all-targets -- -D warnings
 
 # Android APK (containerised; builds the toolchain image on first run)
-./build.sh                       # -> dist/nairobi-debug.apk
-adb install -r dist/nairobi-debug.apk
+./build.sh                       # -> dist/nairobi-debug-<abi>.apk (one per ABI; default arm64-v8a)
+adb install -r dist/nairobi-debug-arm64-v8a.apk
 ```
 
 See [`CLAUDE.md`](CLAUDE.md) for the architecture and developer notes, and

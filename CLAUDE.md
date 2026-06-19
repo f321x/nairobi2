@@ -29,8 +29,8 @@ cargo test  --offline -p nairobi-core                                  # all cor
 cargo clippy --offline -p nairobi-core --all-targets -- -D warnings    # the lint gate
 cargo test  --offline -p nairobi-core <name>                           # one test by substring
 
-./build.sh            # debug APK in the container  -> dist/nairobi-debug.apk
-./build.sh release    # signed release APK          -> dist/nairobi-release.apk (needs signing env)
+./build.sh            # debug APK(s) in the container -> dist/nairobi-debug-<abi>.apk (one per ABI)
+./build.sh release    # signed release APKs          -> dist/nairobi-release-<abi>.apk (needs signing env)
 ./build.sh keystore   # generate the release keystore in the image -> release-signing/
 ./build.sh test       # run the Rust test suite inside the container
 ./build.sh image      # (re)build the builder image only
@@ -169,9 +169,11 @@ stays light and ring-only. Building the backend:
   `RUSTFLAGS="--cfg tokio_unstable" cargo check -p nairobi-wallet-fedimint --features fedimint`,
   and is now **compiled into the APK** (`scripts/build-apk.sh` → `--features android,fedimint`).
 - `app/` + `android/` + build pipeline — **build end-to-end.** `./build.sh` (podman/Docker)
-  produces a valid, signed **`dist/nairobi-debug.apk`** (`io.nairobi.app`, arm64-v8a, minSdk 26):
+  produces a valid, signed **`dist/nairobi-debug-arm64-v8a.apk`** (`io.nairobi.app`, minSdk 26):
   `libnairobi_app.so` (Rust+Slint+Skia+nostr-sdk+**Fedimint**) + `libc++_shared.so` + the Java
-  shell in `classes.dex`. The Fedimint dependency tree (iroh/quinn/aws-lc) grows the binary
+  shell in `classes.dex`. The build emits one APK per ABI (Gradle ABI split; `ABIS=...` selects
+  them, default `arm64-v8a`) so x86_64 (emulator) ships separately from arm64-v8a (phones) rather
+  than as one fat APK. The Fedimint dependency tree (iroh/quinn/aws-lc) grows the binary
   noticeably. **On-device runtime is not yet exercised** (no device/emulator here, and the desktop
   build needs GL libs absent from the image).
   See the spec for what's deferred (ratings, pre-request driver map, boot-resume, key backup).

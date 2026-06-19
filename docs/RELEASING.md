@@ -6,7 +6,7 @@ CI ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) does three things
 | --- | --- | --- |
 | Push to `master` | `test` | Compile + `cargo test --workspace` + clippy |
 | Pull request | `test`, `debug-apk` | The above, plus an installable **debug** APK (uploaded as a build artifact), signed with an ephemeral debug key |
-| Push a tag `v*` | `test`, `release-apk` | The above, plus a **signed release** APK attached to the tag's GitHub Release |
+| Push a tag `v*` | `test`, `release-apk` | The above, plus a **signed release** APK per ABI attached to the tag's GitHub Release |
 
 The debug APK on PRs uses Android's auto-generated debug keystore — nothing to
 configure. The **release** APK is signed with a *persistent* key you control,
@@ -75,9 +75,11 @@ git push origin v0.1.0
 - `versionName` = the tag without the leading `v` (e.g. `0.1.0`).
 - `versionCode` = the workflow run number (monotonically increasing).
 
-The `release-apk` job builds `dist/nairobi-release.apk`, renames it to
-`nairobi-v0.1.0.apk`, and attaches it to the tag's GitHub Release (created with
-auto-generated notes). Re-running the job re-uploads the asset.
+The `release-apk` job builds one signed APK per ABI
+(`dist/nairobi-release-arm64-v8a.apk` for phones, `dist/nairobi-release-x86_64.apk`
+for emulators), renames each to `nairobi-v0.1.0-<abi>.apk`, and attaches them to
+the tag's GitHub Release (created with auto-generated notes). Re-running the job
+re-uploads the assets.
 
 ## Building a signed release locally
 
@@ -88,7 +90,7 @@ NAIROBI_KEYSTORE=release-signing/nairobi-release.jks \
 NAIROBI_KEYSTORE_PASSWORD="$(grep '^RELEASE_KEYSTORE_PASSWORD=' release-signing/secrets.env | cut -d= -f2-)" \
 NAIROBI_KEY_ALIAS=nairobi \
 NAIROBI_KEY_PASSWORD="$(grep '^RELEASE_KEY_PASSWORD=' release-signing/secrets.env | cut -d= -f2-)" \
-./build.sh release            # -> dist/nairobi-release.apk
+./build.sh release            # -> dist/nairobi-release-<abi>.apk (one per ABI)
 ```
 
 Without `NAIROBI_KEYSTORE`, `./build.sh release` refuses to run rather than emit

@@ -140,7 +140,7 @@ struct ViewState {
     /// The configured Fedimint federation invite (empty = none yet).
     federation_invite: String,
     /// Proof-of-burn notarizations we've initiated (most-recent first), shown in
-    /// Settings with a tap-to-open-on-mempool.space action.
+    /// Settings with a tap-to-open-on-mempool.emzy.de action.
     notarizations: Vec<Notarization>,
     /// Our total confirmed-burn reputation (sats), shown above the list.
     reputation_sats: u64,
@@ -1119,7 +1119,7 @@ impl Controller {
             let txid = txid.trim();
             if !txid.is_empty() {
                 ctrl.platform
-                    .open_url(&format!("https://mempool.space/tx/{txid}"));
+                    .open_url(&format!("https://mempool.emzy.de/tx/{txid}"));
             }
         });
         hook!(on_publish_bond, |ctrl, amount: slint::SharedString| {

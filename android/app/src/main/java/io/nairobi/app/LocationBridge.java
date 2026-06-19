@@ -259,7 +259,7 @@ public final class LocationBridge {
 
     /**
      * Open a web URL in the system browser — used to inspect a proof-of-burn
-     * notarization transaction on a block explorer (e.g. mempool.space).
+     * notarization transaction on a block explorer (e.g. mempool.emzy.de).
      */
     public static void openUrl(final String url) {
         final Context ctx = locationContext();

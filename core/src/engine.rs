@@ -173,14 +173,14 @@ pub struct DriverSnapshot {
 
 /// A proof-of-burn notarization we initiated — surfaced to the UI so the user
 /// can inspect the Bitcoin transaction (e.g. open it on a block explorer like
-/// mempool.space).
+/// mempool.emzy.de).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Notarization {
     /// Stable leaf-hash (hex) identifying this burn across re-fetches — the txid
     /// changes when the notary RBFs the batch, so the leaf is what dedups a
     /// mempool entry against its later confirmed upgrade. Not shown to the user.
     pub leaf: String,
-    /// Notarization transaction id, display hex (what `mempool.space/tx/<txid>`
+    /// Notarization transaction id, display hex (what `mempool.emzy.de/tx/<txid>`
     /// expects). Empty only for a not-yet-broadcast proof.
     pub txid: String,
     /// What the burn was for: `"Identity bond"`, `"Ride"`, or `"Boost"`.

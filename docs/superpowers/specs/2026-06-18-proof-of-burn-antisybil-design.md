@@ -132,7 +132,7 @@ Implements Part B of the API doc. Per-proof:
 
 ### 8.2 Transport gotchas
 - **Electrum is JSON-RPC over a raw TLS socket** (newline-delimited), *not* HTTP — ports 50002 (SSL) / 50001 (TCP). Reuse the existing **tokio-rustls/ring** stack for the socket; the framing is trivial (`{"id","method","params"}\n`).
-- **Many Electrum servers self-sign** — `webpki-roots` validation will reject them. Integrity comes from SPV/merkle, not TLS, so use **TOFU / pinned certs** (or accept-any) for Electrum, and lean on multi-server cross-check. (A hosted REST explorer like `mempool.space`/`blockstream.info` over the existing HTTPS-GET path is a viable *fallback* for clients that won't open raw sockets, but the user's requirement is Electrum, so Electrum is primary.)
+- **Many Electrum servers self-sign** — `webpki-roots` validation will reject them. Integrity comes from SPV/merkle, not TLS, so use **TOFU / pinned certs** (or accept-any) for Electrum, and lean on multi-server cross-check. (A hosted REST explorer like `mempool.emzy.de`/`blockstream.info` over the existing HTTPS-GET path is a viable *fallback* for clients that won't open raw sockets, but the user's requirement is Electrum, so Electrum is primary.)
 
 ---
 

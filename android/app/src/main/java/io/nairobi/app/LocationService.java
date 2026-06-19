@@ -67,7 +67,7 @@ public class LocationService extends Service {
         if (Build.VERSION.SDK_INT >= 26) {
             NotificationChannel channel = new NotificationChannel(
                     CHANNEL_ID, "Live ride tracking", NotificationManager.IMPORTANCE_LOW);
-            channel.setDescription("Shown while Nairobi is tracking your ride");
+            channel.setDescription("Shown while nairobi2 is tracking your ride");
             nm.createNotificationChannel(channel);
         }
 
